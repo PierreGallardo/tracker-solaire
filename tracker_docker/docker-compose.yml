@@ -1,23 +1,62 @@
-# Compilation et flashage OTA du firmware du tracker.
+# Tracker solaire : interface web + compilation + flashage OTA du firmware.
 #
-#   docker compose build                                   (1 fois, long)
-#   docker compose run --rm tracker-build                  (compile)
-#   docker compose --profile flash run --rm tracker-ota    (envoie a la carte)
+#   Interface web (tourne en permanence) :
+#     ./definir-mot-de-passe.sh                            (1 fois)
+#     docker compose up -d tracker-web
+#
+#   Firmware :
+#     docker compose build tracker-build                   (1 fois, long)
+#     docker compose run --rm tracker-build                (compile)
+#     docker compose --profile flash run --rm tracker-ota  (envoie a la carte)
 #
 # Le flashage est dans un "profil" : il ne se lance JAMAIS par accident
 # avec un simple "docker compose up".
 
 services:
+  # ------------------------------------------------------------------
+  # Interface web : HTTPS + mot de passe, pages servies par le serveur,
+  # commandes relayees a l'ESP32 sur le reseau local.
+  # ------------------------------------------------------------------
+  tracker-web:
+    build:
+      # Racine du depot : l'image lit les pages HTML dans le firmware.
+      # Le .dockerignore de la racine n'y laisse entrer que ces pages.
+      context: ..
+      dockerfile: tracker_docker/web/Dockerfile
+    image: tracker-web:54
+    restart: unless-stopped
+    # Seules les variables utiles sont transmises (pas le mot de passe OTA).
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-}
+      ESP32_URL: ${ESP32_URL:-http://192.168.1.60}
+      WEB_USER: ${WEB_USER:-}
+      WEB_PASSWORD_HASH: ${WEB_PASSWORD_HASH:-}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      # Certificats HTTPS : a conserver, sinon Let's Encrypt est
+      # resollicite a chaque redemarrage (et limite les demandes).
+      - caddy-data:/data
+      - caddy-config:/config
+
+  # ------------------------------------------------------------------
+  # Compilation du firmware (image de ton pere, inchangee)
+  # ------------------------------------------------------------------
   tracker-build:
     build: .
     image: tracker-firmware-build:54
     volumes:
-      # Le code source est monte, jamais copie dans l'image (Config.h contient
-      # des mots de passe). Chemin relatif a ce dossier : adapte-le si besoin.
+      # Le code source est monte, jamais copie dans l'image (Secrets.h
+      # contient des mots de passe). Chemin relatif a ce dossier.
       - ../tracker_web_control54:/work/tracker_web_control54:ro
       # Binaire + cache de compilation : les recompilations suivantes sont rapides.
       - tracker-out:/out
 
+  # ------------------------------------------------------------------
+  # Flashage OTA (image de ton pere, inchangee)
+  # ------------------------------------------------------------------
   tracker-ota:
     profiles: ["flash"]
     image: tracker-firmware-build:54
@@ -31,3 +70,5 @@ services:
 
 volumes:
   tracker-out:
+  caddy-data:
+  caddy-config:

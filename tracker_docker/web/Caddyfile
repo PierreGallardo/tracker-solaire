@@ -1,0 +1,82 @@
+# ============================================================
+# Serveur web du tracker solaire (image "tracker-web")
+#
+#  Navigateur ──HTTPS + mot de passe──► ce serveur ──HTTP (LAN)──► ESP32
+#
+#  - Les 3 pages (/, /calibration, /codeur) sont servies par le
+#    serveur : elles ont ete extraites du firmware a la construction
+#    de l'image (voir extraire_pages.py).
+#  - Tout le reste (/status, /api/*, commandes moteur) est relaye a
+#    l'ESP32, qui reste seul maitre de la logique et de la securite.
+#
+# Variables (fichier .env) :
+#   SITE_ADDRESS       nom de domaine -> HTTPS automatique (Let's Encrypt)
+#                      ou ":80" pour un test en HTTP sur le reseau local
+#   ESP32_URL          adresse de l'ESP32 sur le reseau local
+#   WEB_USER           identifiant de l'interface web
+#   WEB_PASSWORD_HASH  empreinte bcrypt (./definir-mot-de-passe.sh)
+# ============================================================
+
+{
+	# API d'administration de Caddy desactivee : rien a piloter a distance.
+	admin off
+}
+
+{$SITE_ADDRESS} {
+	# Mot de passe OBLIGATOIRE sur tout le site : les commandes moteur
+	# de l'ESP32 n'ont aucune authentification propre.
+	basic_auth {
+		{$WEB_USER} {$WEB_PASSWORD_HASH}
+	}
+
+	encode gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	root * /srv
+
+	# --- Pages HTML (extraites du firmware) -----------------------
+	handle / {
+		header Cache-Control no-cache
+		rewrite * /index.html
+		file_server
+	}
+	handle /calibration {
+		header Cache-Control no-cache
+		rewrite * /calibration.html
+		file_server
+	}
+	handle /codeur {
+		header Cache-Control no-cache
+		rewrite * /codeur.html
+		file_server
+	}
+
+	# --- Tout le reste : relaye a l'ESP32 --------------------------
+	# Caddy ajoute l'en-tete X-Forwarded-For : le firmware s'en sert
+	# pour REFUSER la calibration a distance (elle fait tourner le
+	# tracker). C'est voulu : la calibration se fait sur place, en
+	# allant directement sur l'adresse de l'ESP32.
+	handle {
+		reverse_proxy {$ESP32_URL} {
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 20s
+				# Le petit serveur web de l'ESP32 gere mal les
+				# connexions persistantes : une connexion par requete.
+				keepalive off
+			}
+		}
+	}
+
+	# --- ESP32 eteint, hors WiFi ou en cours de flashage ------------
+	handle_errors 502 503 504 {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "Tracker injoignable : l'ESP32 ne repond pas sur le reseau local (eteint, hors WiFi ou en cours de redemarrage). Reessaie dans un instant." 502
+	}
+}

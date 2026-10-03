@@ -1,0 +1,8 @@
+# Contexte de construction de l'image tracker-web (racine du depot).
+# Liste BLANCHE : tout est exclu, sauf ce dont l'image a besoin.
+# Ainsi Secrets.h, .env et les binaires ne peuvent jamais y entrer.
+*
+!tracker_docker/web/
+!tracker_web_control54/PageWeb.h
+!tracker_web_control54/PageCalib.h
+!tracker_web_control54/PageCodeur.h
