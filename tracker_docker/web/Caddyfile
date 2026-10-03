@@ -1,7 +1,8 @@
 # ============================================================
 # Serveur web du tracker solaire (image "tracker-web")
 #
-#  Navigateur ──HTTPS + mot de passe──► ce serveur ──HTTP (LAN)──► ESP32
+#  Navigateur ──HTTPS──► Nginx Proxy Manager ──HTTP──► ce Caddy ──HTTP (LAN)──► ESP32
+#                        (domaine, certificat)          (mot de passe, pages)
 #
 #  - Les 3 pages (/, /calibration, /codeur) sont servies par le
 #    serveur : elles ont ete extraites du firmware a la construction
@@ -10,8 +11,9 @@
 #    l'ESP32, qui reste seul maitre de la logique et de la securite.
 #
 # Variables (fichier .env) :
-#   SITE_ADDRESS       nom de domaine -> HTTPS automatique (Let's Encrypt)
-#                      ou ":80" pour un test en HTTP sur le reseau local
+#   SITE_ADDRESS       ":80" derriere un reverse proxy (fixe dans
+#                      docker-compose.yml). Un nom de domaine a la place
+#                      ferait faire le HTTPS par Caddy lui-meme (sans NPM).
 #   ESP32_URL          adresse de l'ESP32 sur le reseau local
 #   WEB_USER           identifiant de l'interface web
 #   WEB_PASSWORD_HASH  empreinte bcrypt (./definir-mot-de-passe.sh)
