@@ -1,0 +1,567 @@
+#include "Vent.h"
+#include "Config.h"
+#include "CapteursI2C.h"   // horodatage RTC des evenements
+#include "Meteo.h"         // croisement avec le vent regional
+
+#include <ArduinoJson.h>
+#include <Preferences.h>   // NVS : persistance de l'historique
+
+static Preferences prefs;
+static bool nvsOuvert = false;
+
+// --- Acquisition analogique ---------------------------------
+// Le HWFS-1 delivre une tension continue proportionnelle a la
+// vitesse. On echantillonne l'ADC toutes les PERIODE_ECHANT_MS,
+// puis deux fenetres exploitent ces echantillons :
+//   - 5 s : la MOYENNE, pour la vitesse etablie
+//   - 2 s : le MAXIMUM, pour la rafale (un pic ne se moyenne pas)
+static float         vitesseVentKmh   = 0.0;
+static float         vitesseRafaleKmh = 0.0;
+static float         tensionActuelleV = 0.0;
+static unsigned long lastMesureVent   = 0;
+static unsigned long lastMesureRafale = 0;
+static unsigned long lastEchantillon  = 0;
+
+static double sommeFenetre = 0.0;   // accumulateur de la moyenne 5 s
+static int    nbFenetre    = 0;
+static float  maxRafale    = 0.0;   // pic courant de la fenetre 2 s
+
+static bool          securiteVentActive = false;  // palier 2 : retour a plat
+static unsigned long debutCalme = 0;   // 0 = aucun delai de sortie en cours
+static bool modeVentReduit     = false;   // palier 1 : amplitude reduite
+
+// --- Buffer circulaire pour la tendance ---------------------
+static float  bufferVent[NB_ECHANTILLONS_TENDANCE];
+static int    bufferVentIndex  = 0;
+static int    bufferVentRempli = 0;
+static String tendanceVent     = "stable"; // "up" / "down" / "stable"
+
+// --- Historique des mises en securite (RAM uniquement) ------
+static char        histHeure[NB_EVENEMENTS_VENT][9];  // "HH:MM:SS"
+static float       histVitesse[NB_EVENEMENTS_VENT];
+static const char* histCause[NB_EVENEMENTS_VENT];     // "moyenne" / "rafale"
+static int         histIndex  = 0;
+static int         histRempli = 0;
+
+// ============================================================
+// HISTORIQUE
+// ============================================================
+
+// Extrait "HH:MM:SS" de l'horodatage RTC complet, ou "??:??:??"
+// si la RTC n'a pas repondu.
+static void heureCourteRTC(char* dest, size_t taille) {
+  char complet[20];
+  if (lireHeureRTC(complet, sizeof(complet))) {
+    // "AAAA-MM-JJ hh:mm:ss" : l'heure commence a l'offset 11
+    strncpy(dest, complet + 11, taille - 1);
+  } else {
+    strncpy(dest, "??:??:??", taille - 1);
+  }
+  dest[taille - 1] = '\0';
+}
+
+// --- Persistance NVS ----------------------------------------
+// Format compact : "HH:MM:SS,vitesse,cause|" par evenement,
+// du plus ancien au plus recent.
+
+static void sauvegarderHistoriqueVent() {
+  if (!nvsOuvert) return;
+
+  String data = "";
+  for (int i = 0; i < histRempli; i++) {
+    int idx = (histIndex - histRempli + i + NB_EVENEMENTS_VENT) % NB_EVENEMENTS_VENT;
+    data += String(histHeure[idx]) + "," + String(histVitesse[idx], 1) + "," + histCause[idx] + "|";
+  }
+  prefs.putString("histVent", data);
+}
+
+static void chargerHistoriqueVent() {
+  String data = prefs.getString("histVent", "");
+  if (data.length() == 0) return; // aucun historique sauvegarde
+
+  histIndex  = 0;
+  histRempli = 0;
+
+  int pos = 0;
+  while (pos < (int)data.length()) {
+    int delim1 = data.indexOf(',', pos);
+    int delim2 = data.indexOf(',', delim1 + 1);
+    int delim3 = data.indexOf('|', delim2 + 1);
+    if (delim1 == -1 || delim2 == -1 || delim3 == -1) break;
+
+    String h = data.substring(pos, delim1);
+    float  v = data.substring(delim1 + 1, delim2).toFloat();
+    String c = data.substring(delim2 + 1, delim3);
+
+    strncpy(histHeure[histIndex], h.c_str(), sizeof(histHeure[histIndex]) - 1);
+    histHeure[histIndex][sizeof(histHeure[histIndex]) - 1] = '\0';
+    histVitesse[histIndex] = v;
+    // On repointe vers les litteraux statiques : histCause ne doit
+    // jamais pointer vers une String temporaire.
+    histCause[histIndex] = (c == "rafale") ? "rafale" : "moyenne";
+
+    histIndex = (histIndex + 1) % NB_EVENEMENTS_VENT;
+    if (histRempli < NB_EVENEMENTS_VENT) histRempli++;
+
+    pos = delim3 + 1;
+  }
+  histIndex = histRempli % NB_EVENEMENTS_VENT; // remet l'index au bon endroit
+  Serial.printf("Historique vent charge : %d evenements.\n", histRempli);
+}
+
+void initHistoriqueVentNVS() {
+  nvsOuvert = prefs.begin("tracker", false); // namespace "tracker", lecture-ecriture
+  if (!nvsOuvert) {
+    Serial.println("NVS indisponible : l'historique vent ne sera pas conserve.");
+    return;
+  }
+  chargerHistoriqueVent();
+}
+
+// --- Acquittement de l'alerte vent --------------------------
+// Une mise en securite leve une alerte qui reste affichee jusqu'a
+// ce que l'operateur l'acquitte, MEME SI la securite s'est levee
+// entre-temps : quelqu'un qui revient apres une heure d'absence
+// doit voir qu'un evenement s'est produit.
+// L'acquittement dit "j'ai vu" - il ne leve PAS la securite et ne
+// change rien au comportement des moteurs.
+static bool          alerteVentEnAttente = false;
+static float         alerteVitesse       = 0.0;
+static char          alerteCause[9]      = "";
+static char          alerteHeure[9]      = "";
+
+static void enregistrerEvenementVent(float vitesse, const char* cause) {
+  alerteVentEnAttente = true;
+  alerteVitesse       = vitesse;
+  strncpy(alerteCause, cause, sizeof(alerteCause) - 1);
+  alerteCause[sizeof(alerteCause) - 1] = '\0';
+  heureCourteRTC(alerteHeure, sizeof(alerteHeure));
+
+  heureCourteRTC(histHeure[histIndex], sizeof(histHeure[histIndex]));
+  histVitesse[histIndex] = vitesse;
+  histCause[histIndex]   = cause;
+
+  histIndex = (histIndex + 1) % NB_EVENEMENTS_VENT;
+  if (histRempli < NB_EVENEMENTS_VENT) histRempli++;
+
+  sauvegarderHistoriqueVent(); // persiste immediatement en flash
+}
+
+String historiqueVentJson() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+
+  // Du plus ancien au plus recent.
+  for (int i = 0; i < histRempli; i++) {
+    int idx = (histIndex - histRempli + i + NB_EVENEMENTS_VENT) % NB_EVENEMENTS_VENT;
+    JsonObject o = arr.add<JsonObject>();
+    o["h"] = histHeure[idx];
+    o["v"] = roundf(histVitesse[idx] * 10.0f) / 10.0f;
+    o["c"] = histCause[idx];
+  }
+
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+// ============================================================
+// SURVEILLANCE DU CAPTEUR
+// ============================================================
+
+static float         tensionMaxVue     = 0.0;  // plus haute tension depuis le boot
+static unsigned long derniereActivite  = 0;    // dernier depassement du seuil
+static unsigned long debutEcartMeteo   = 0;
+
+static bool   anemoSuspect  = false;  // une condition de defaut est vraie
+static bool   anemoAcquitte = false;  // l'operateur a pris connaissance
+static String anemoCause    = "";
+
+void updateDiagnosticAnemo() {
+  bool defaut = false;
+  const char* cause = "";
+
+  // --- 1. Aucune tension significative depuis 24 h ---
+  // Capteur debranche, fil coupe, ou rotor bloque. Sur un site
+  // meme tres abrite, 24 h sans le moindre souffle est anormal.
+  if (derniereActivite != 0 &&
+      millis() - derniereActivite >= ANEMO_SILENCE_SUSPECT_MS) {
+    defaut = true;
+    cause = "aucune tension depuis 24 h : capteur debranche ou rotor bloque";
+  }
+
+  // --- 2. Ecart avec la meteo regionale ---
+  // Pas une preuve : le site est abrite, il peut legitimement
+  // etre a zero quand la plaine souffle. D'ou seuil haut + duree.
+  if (!defaut && meteo.valide &&
+      meteo.ventKmh >= ANEMO_ECART_METEO_KMH && vitesseVentKmh == 0.0) {
+    if (debutEcartMeteo == 0) debutEcartMeteo = millis();
+    else if (millis() - debutEcartMeteo >= ANEMO_ECART_METEO_MS) {
+      defaut = true;
+      cause = "vent regional annonce mais rien en local depuis 30 min";
+    }
+  } else {
+    debutEcartMeteo = 0;
+  }
+
+  if (defaut && !anemoSuspect) {
+    anemoSuspect  = true;
+    anemoAcquitte = false;          // toute nouvelle alerte redemande un acquittement
+    anemoCause    = cause;
+    Serial.printf("ANEMOMETRE SUSPECT : %s\n", cause);
+  } else if (!defaut && anemoSuspect) {
+    // Le capteur est reparti : l'alerte se resout seule et se
+    // rearme pour la prochaine fois.
+    anemoSuspect  = false;
+    anemoAcquitte = false;
+    anemoCause    = "";
+    Serial.println("Anemometre : retour a la normale.");
+  }
+}
+
+void acquitterAnemo() {
+  if (!anemoSuspect) return;
+  anemoAcquitte = true;
+  Serial.println("Alerte anemometre acquittee par l'operateur.");
+}
+
+bool anemoEstSuspect()   { return anemoSuspect; }
+bool anemoEstAcquitte()  { return anemoAcquitte; }
+const String& anemoCauseSuspicion() { return anemoCause; }
+
+// Tension brute lue a l'instant : le repere de diagnostic le plus
+// direct. 0 V au repos, elle monte avec la vitesse.
+float anemoTensionV()    { return tensionActuelleV; }
+float anemoTensionMaxV() { return tensionMaxVue; }
+
+// Secondes depuis le dernier depassement du seuil d'activite.
+unsigned long anemoSecondesDepuisActivite() {
+  if (derniereActivite == 0) return 0;
+  return (millis() - derniereActivite) / 1000UL;
+}
+
+// ============================================================
+// TENDANCE
+// ============================================================
+
+// Compare la moyenne de la 1ere moitie du buffer a celle de la
+// 2eme moitie. SEUIL_TENDANCE_KMH evite de reagir au bruit.
+static String calculerTendanceVent() {
+  if (bufferVentRempli < 4) return "stable"; // pas assez d'historique pour juger
+
+  int moitie = bufferVentRempli / 2;
+  float sommeAncien = 0, sommeRecent = 0;
+  int nAncien = 0, nRecent = 0;
+
+  for (int i = 0; i < bufferVentRempli; i++) {
+    int idx = (bufferVentIndex - bufferVentRempli + i + NB_ECHANTILLONS_TENDANCE) % NB_ECHANTILLONS_TENDANCE;
+    if (i < moitie) { sommeAncien += bufferVent[idx]; nAncien++; }
+    else            { sommeRecent += bufferVent[idx]; nRecent++; }
+  }
+
+  float diff = (sommeRecent / nRecent) - (sommeAncien / nAncien);
+  if (diff > SEUIL_TENDANCE_KMH)  return "up";
+  if (diff < -SEUIL_TENDANCE_KMH) return "down";
+  return "stable";
+}
+
+// ============================================================
+// EPISODE DE VENT FORT - suivi rapproche
+// ============================================================
+
+static float  epPic[NB_VALEURS_EPISODE];    // pic de chaque fenetre de 5 s
+static float  epMoy[NB_VALEURS_EPISODE];    // moyenne de chaque fenetre
+static int    epIndex  = 0;
+static int    epRempli = 0;
+
+static bool   epActif          = false;
+static char   epHeure[9]       = "";        // heure RTC du declenchement
+static String epTendance       = "stable";
+static int    epFenetresCalmes = 0;
+
+static unsigned long epDebutFenetre = 0;
+static float         epMaxFenetre   = 0.0;
+static double        epSommeFenetre = 0.0;
+static int           epNbFenetre    = 0;
+
+static void epAjouter(float pic, float moy) {
+  epPic[epIndex] = pic;
+  epMoy[epIndex] = moy;
+  epIndex = (epIndex + 1) % NB_VALEURS_EPISODE;
+  if (epRempli < NB_VALEURS_EPISODE) epRempli++;
+}
+
+// Moitie ancienne contre moitie recente du tampon, sur les MOYENNES
+// (moins bruitees que les pics). Meme principe que la tendance 30 s.
+static String epCalculerTendance() {
+  if (epRempli < 4) return "stable";   // pas assez de valeurs pour juger
+
+  int moitie = epRempli / 2;
+  float sommeAncien = 0, sommeRecent = 0;
+  int nAncien = 0, nRecent = 0;
+
+  for (int i = 0; i < epRempli; i++) {
+    int idx = (epIndex - epRempli + i + NB_VALEURS_EPISODE) % NB_VALEURS_EPISODE;
+    if (i < moitie) { sommeAncien += epMoy[idx]; nAncien++; }
+    else            { sommeRecent += epMoy[idx]; nRecent++; }
+  }
+
+  float diff = (sommeRecent / nRecent) - (sommeAncien / nAncien);
+  if (diff >  SEUIL_TENDANCE_EPISODE_KMH) return "up";
+  if (diff < -SEUIL_TENDANCE_EPISODE_KMH) return "down";
+  return "stable";
+}
+
+// Appelee pour chaque echantillon de l'ADC (toutes les 100 ms).
+static void traiterEpisode(float kmh) {
+  // --- Declenchement : un pic au-dela du seuil ouvre l'episode ---
+  if (!epActif) {
+    if (kmh < SEUIL_EPISODE_KMH) return;
+
+    epActif  = true;
+    epIndex  = 0;
+    epRempli = 0;                       // nouvel episode : tampon neuf
+    epFenetresCalmes = 0;
+    epMaxFenetre = 0.0; epSommeFenetre = 0.0; epNbFenetre = 0;
+    epDebutFenetre = millis();
+    heureCourteRTC(epHeure, sizeof(epHeure));
+
+    // Premier point = le pic declencheur lui-meme, a t = 0.
+    epAjouter(kmh, kmh);
+    epTendance = epCalculerTendance();
+    Serial.printf("EPISODE VENT : pic a %.1f km/h - releve toutes les %lu s.\n",
+                  kmh, PERIODE_EPISODE_MS / 1000UL);
+    return;
+  }
+
+  // --- Episode en cours : on accumule la fenetre de 5 s ---
+  epSommeFenetre += kmh;
+  epNbFenetre++;
+  if (kmh > epMaxFenetre) epMaxFenetre = kmh;
+
+  if (millis() - epDebutFenetre < PERIODE_EPISODE_MS) return;
+
+  // Fenetre terminee : on enregistre pic et moyenne.
+  float pic = epMaxFenetre;
+  float moy = (epNbFenetre > 0) ? (float)(epSommeFenetre / epNbFenetre) : 0.0f;
+  epAjouter(pic, moy);
+  epTendance = epCalculerTendance();
+
+  epDebutFenetre = millis();
+  epMaxFenetre = 0.0; epSommeFenetre = 0.0; epNbFenetre = 0;
+
+  // --- Fin d'episode : 30 s consecutives sous le seuil ---
+  if (pic < SEUIL_EPISODE_KMH) epFenetresCalmes++;
+  else                         epFenetresCalmes = 0;
+
+  if (epFenetresCalmes >= EPISODE_FENETRES_CALMES) {
+    epActif = false;
+    Serial.printf("Episode vent termine : %d valeurs conservees, tendance %s.\n",
+                  epRempli, epTendance.c_str());
+  }
+}
+
+bool          ventEpisodeActif()     { return epActif; }
+const String& ventEpisodeTendance()  { return epTendance; }
+int           ventEpisodeNbValeurs() { return epRempli; }
+
+String episodeVentJson() {
+  JsonDocument doc;
+  doc["actif"]    = epActif;
+  doc["heure"]    = epHeure;
+  doc["tendance"] = epTendance;
+  JsonArray arr = doc["valeurs"].to<JsonArray>();
+
+  // Du plus ancien au plus recent.
+  for (int i = 0; i < epRempli; i++) {
+    int idx = (epIndex - epRempli + i + NB_VALEURS_EPISODE) % NB_VALEURS_EPISODE;
+    JsonObject o = arr.add<JsonObject>();
+    o["p"] = roundf(epPic[idx] * 10.0f) / 10.0f;
+    o["m"] = roundf(epMoy[idx] * 10.0f) / 10.0f;
+  }
+
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+// ============================================================
+// ACQUISITION
+// ============================================================
+
+// Lecture de la tension du capteur, moyennee pour lisser le bruit
+// de l'ADC. analogReadMilliVolts applique l'etalonnage d'usine de
+// l'ESP32 : il corrige la non-linearite bien connue de son ADC,
+// ce qu'un analogRead() brut ne fait pas.
+// Offset mesure au demarrage, capteur au repos. L'ADC de l'ESP32
+// ne descend pas jusqu'a zero : il retourne ~140 mV pour une
+// entree nulle. Sans cette correction, le tracker affichait 7 km/h
+// en permanence par temps calme - un biais qui fausse des seuils
+// places a 30, 40 et 50 km/h.
+static float offsetAdcV = 0.0;
+
+static float lireTensionAnemoV() {
+  uint32_t somme = 0;
+  for (int i = 0; i < NB_LECTURES_ADC; i++) {
+    somme += analogReadMilliVolts(PIN_ANEMOMETRE);
+  }
+  float v = (somme / (float)NB_LECTURES_ADC) / 1000.0f - offsetAdcV;
+  return (v > 0.0f) ? v : 0.0f;
+}
+
+void setupAnemometre() {
+  // Ni pinMode, ni pull-up, ni interruption : le capteur impose
+  // lui-meme sa tension. Un pull-up la court-circuiterait.
+  // ADC_6db (0-2,2 V, soit 110 km/h) plutot que 11db : l'ESP32 y
+  // est plus lineaire et moins bruite. On perd le haut de
+  // l'echelle, sans consequence puisque la mise en securite se
+  // declenche des 50 km/h.
+  analogSetPinAttenuation(PIN_ANEMOMETRE, ADC_6db);
+
+  // Etalonnage du zero : au demarrage les coupelles sont a l'arret
+  // dans l'immense majorite des cas. Si du vent souffle deja, la
+  // valeur lue serait trop haute : on la plafonne pour ne jamais
+  // masquer plus que le bruit de fond de l'ADC.
+  delay(50);
+  uint32_t somme = 0;
+  for (int i = 0; i < 32; i++) { somme += analogReadMilliVolts(PIN_ANEMOMETRE); delay(2); }
+  offsetAdcV = (somme / 32.0f) / 1000.0f;
+  if (offsetAdcV > 0.25f) offsetAdcV = 0.25f;
+  Serial.printf("Anemometre : offset ADC mesure = %.0f mV\n", offsetAdcV * 1000.0f);
+  lastMesureVent   = millis();
+  lastMesureRafale = millis();
+  lastEchantillon  = millis();
+  derniereActivite = millis();   // amorce : pas d'alerte "silence" des le boot
+}
+
+// Echantillonnage + fenetre longue (5 s) : moyenne, tendance, paliers.
+void updateVent() {
+  // --- Echantillonnage regulier de l'ADC ---
+  if (millis() - lastEchantillon >= PERIODE_ECHANT_MS) {
+    lastEchantillon = millis();
+    tensionActuelleV = lireTensionAnemoV();
+    float kmh = tensionActuelleV * FACTEUR_VOLT_KMH;
+
+    sommeFenetre += kmh;
+    nbFenetre++;
+    if (kmh > maxRafale) maxRafale = kmh;          // pic de la fenetre 2 s
+    traiterEpisode(kmh);                           // suivi rapproche > 30 km/h
+
+    if (tensionActuelleV >= ANEMO_SEUIL_ACTIVITE_V) derniereActivite = millis();
+    if (tensionActuelleV > tensionMaxVue) tensionMaxVue = tensionActuelleV;
+  }
+
+  if (millis() - lastMesureVent >= FENETRE_VENT_MS) {
+    vitesseVentKmh = (nbFenetre > 0) ? (float)(sommeFenetre / nbFenetre) : 0.0f;
+    sommeFenetre = 0.0;
+    nbFenetre    = 0;
+
+    bufferVent[bufferVentIndex] = vitesseVentKmh;
+    bufferVentIndex = (bufferVentIndex + 1) % NB_ECHANTILLONS_TENDANCE;
+    if (bufferVentRempli < NB_ECHANTILLONS_TENDANCE) bufferVentRempli++;
+    tendanceVent = calculerTendanceVent();
+
+    // --- Palier 1 : mode reduit (amplitude + vitesse limitees) ---
+    if (vitesseVentKmh >= SEUIL_VENT_REDUIT && !modeVentReduit) {
+      modeVentReduit = true;
+      Serial.printf("VENT MODERE : %.1f km/h - amplitude limitee a %.0f deg, PWM %d\n",
+                    vitesseVentKmh, (double)ANGLE_MAX_VENT_REDUIT_DEG, VITESSE_REDUITE);
+    }
+    if (vitesseVentKmh < SEUIL_VENT_REDUIT * 0.8) {
+      modeVentReduit = false; // desactivation avec hysteresis (32 km/h)
+    }
+
+    // --- Palier 2 : mise en securite sur la moyenne ---
+    if (vitesseVentKmh >= SEUIL_VENT_SECURITE && !securiteVentActive) {
+      securiteVentActive = true;
+      debutCalme = 0;
+      enregistrerEvenementVent(vitesseVentKmh, "moyenne");
+      Serial.printf("ALERTE VENT : %.1f km/h - retour a plat automatique !\n", vitesseVentKmh);
+    }
+    // La sortie de securite n'est PAS traitee ici : elle depend
+    // uniquement de la rafale, voir updateRafale().
+
+    lastMesureVent = millis();
+  }
+}
+
+// Fenetre courte (2 s) : pic instantane. Permet de reagir a une
+// rafale breve que la moyenne sur 5 s aurait lissee.
+void updateRafale() {
+  if (millis() - lastMesureRafale >= GUST_WINDOW_MS) {
+    // Le MAXIMUM des echantillons, pas leur moyenne : une rafale
+    // de 2 s noyee dans une moyenne n'est plus une rafale.
+    vitesseRafaleKmh = maxRafale;
+    maxRafale = 0.0;
+
+    if (vitesseRafaleKmh >= SEUIL_RAFALE_SECURITE && !securiteVentActive) {
+      securiteVentActive = true;
+      debutCalme = 0;
+      enregistrerEvenementVent(vitesseRafaleKmh, "rafale");
+      Serial.printf("ALERTE RAFALE : %.1f km/h sur %d s - retour a plat automatique !\n",
+                    vitesseRafaleKmh, (int)(GUST_WINDOW_MS / 1000));
+    }
+
+    // --- Sortie de securite : 1 h de calme ININTERROMPU ---
+    // Le compteur ne demarre que sous SEUIL_VENT_SORTIE et repart
+    // de zero au moindre pic au-dessus. Un tracker redeploye entre
+    // deux rafales est un tracker qu'on casse.
+    if (securiteVentActive) {
+      if (vitesseRafaleKmh < SEUIL_VENT_SORTIE) {
+        if (debutCalme == 0) {
+          debutCalme = millis();
+          Serial.printf("Vent retombe sous %.0f km/h : debut du delai de %lu min.\n",
+                        (double)SEUIL_VENT_SORTIE, DUREE_CALME_REQUISE_MS / 60000UL);
+        } else if (millis() - debutCalme >= DUREE_CALME_REQUISE_MS) {
+          securiteVentActive = false;
+          debutCalme = 0;
+          Serial.println("Calme confirme sur toute la duree : fin de la mise en securite.");
+        }
+      } else if (debutCalme != 0) {
+        Serial.printf("Rafale a %.1f km/h : delai de securite remis a zero.\n", vitesseRafaleKmh);
+        debutCalme = 0;
+      }
+    }
+
+    lastMesureRafale = millis();
+  }
+}
+
+// ============================================================
+// ACCESSEURS
+// ============================================================
+
+float ventVitesseKmh()       { return vitesseVentKmh; }
+float ventRafaleKmh()        { return vitesseRafaleKmh; }
+bool  ventSecuriteActive()   { return securiteVentActive; }
+bool  ventModeReduit()       { return modeVentReduit; }
+const String& ventTendance() { return tendanceVent; }
+
+uint8_t ventVitesseMoteur() {
+  return modeVentReduit ? VITESSE_REDUITE : VITESSE_MANUELLE;
+}
+
+// Secondes restantes avant que la securite puisse etre levee.
+// 0 si la securite est inactive, ou si le delai n'a pas demarre
+// (le vent est encore au-dessus du seuil de sortie).
+unsigned long ventSecondesAvantLevee() {
+  if (!securiteVentActive || debutCalme == 0) return 0;
+  unsigned long ecoule = millis() - debutCalme;
+  if (ecoule >= DUREE_CALME_REQUISE_MS) return 0;
+  return (DUREE_CALME_REQUISE_MS - ecoule) / 1000UL;
+}
+
+// ============================================================
+// ACQUITTEMENT DE L'ALERTE VENT
+// ============================================================
+
+void acquitterVent() {
+  if (!alerteVentEnAttente) return;
+  alerteVentEnAttente = false;
+  Serial.println("Alerte vent acquittee par l'operateur.");
+}
+
+bool          ventAlerteEnAttente() { return alerteVentEnAttente; }
+float         ventAlerteVitesse()   { return alerteVitesse; }
+const char*   ventAlerteCause()     { return alerteCause; }
+const char*   ventAlerteHeure()     { return alerteHeure; }

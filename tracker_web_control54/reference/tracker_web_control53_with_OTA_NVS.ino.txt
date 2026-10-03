@@ -1,0 +1,1014 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
+#include <Preferences.h>
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+#include <RTClib.h>
+#include <time.h>
+
+// ============================================================
+// CONFIG WIFI
+// ============================================================
+
+const char* WIFI_SSID = "MASQUE_VOIR_SECRETS_H";
+const char* WIFI_PASSWORD = "MASQUE_VOIR_SECRETS_H";
+
+// ============================================================
+// CONFIG POSITION (pour la meteo en ligne)
+// ============================================================
+
+#define LATITUDE_DEG    47.1108
+#define LONGITUDE_DEG    6.3032
+
+// ============================================================
+// PILOTAGE MOTEUR REEL (2 axes, BTS7960)
+// ============================================================
+
+#define RPWM_INC   27
+#define LPWM_INC   14
+#define RPWM_AZ    26
+#define LPWM_AZ    25
+
+#define PWM_FREQ   20000
+#define PWM_RES    8
+
+#define VITESSE_MANUELLE  200
+#define DUREE_MAX_MS      15000
+
+// ============================================================
+// I2C : BMP280 (pression/temperature (BMP280)) + RTC DS3231 (heure)
+// ============================================================
+
+#define PIN_SDA  18
+#define PIN_SCL  19
+
+// ============================================================
+// ANEMOMETRE HWFS-1 (contact sec, 2 fils)
+// ============================================================
+#define PIN_ANEMOMETRE       4
+#define FACTEUR_KMH          2.4    // km/h par impulsion/seconde
+#define FENETRE_VENT_MS      5000   // fenetre de mesure vent moyen (ms)
+#define GUST_WINDOW_MS       2000   // fenetre courte pour detecter les rafales (ms)
+#define DEBOUNCE_VENT_MS     15     // anti-rebond
+#define SEUIL_VENT_SECURITE   50.0  // km/h -> retour a plat automatique (vent moyen sur 5s)
+#define SEUIL_RAFALE_SECURITE 50.0  // km/h -> retour a plat automatique (pic sur 2s, meme seuil, fenetre plus courte)
+#define SEUIL_VENT_REDUIT     40.0  // km/h -> amplitude de mouvement reduite (palier intermediaire)
+#define ANGLE_MAX_VENT_REDUIT_DEG 20.0  // inclinaison max autorisee en mode vent modere
+#define VITESSE_REDUITE        120  // PWM reduit en mode vent modere (vs VITESSE_MANUELLE=200)
+
+volatile unsigned long nbImpulsionsVent = 0;
+volatile unsigned long nbImpulsionsRafale = 0;
+volatile unsigned long dernierImpulsionVent = 0;
+float vitesseVentKmh = 0.0;
+float vitesseRafaleKmh = 0.0;
+unsigned long lastMesureVent = 0;
+unsigned long lastMesureRafale = 0;
+bool securiteVentActive = false;
+bool modeVentReduit = false;
+
+// --- Historique des evenements de mise en securite vent ---
+#define NB_EVENEMENTS_VENT 8
+String histHeure[NB_EVENEMENTS_VENT];
+float  histVitesse[NB_EVENEMENTS_VENT];
+String histCause[NB_EVENEMENTS_VENT];
+int histIndex = 0;
+int histRempli = 0;
+
+// ============================================================
+// OTA (Over-The-Air flashage WiFi)
+// ============================================================
+#define OTA_PASSWORD "MASQUE_VOIR_SECRETS_H"  // mot de passe pour flasher via WiFi (optionnel mais recommande)
+Preferences prefs;                   // stockage persistant NVS pour l'historique vent
+
+void sauvegarderHistoriqueVent() {
+  // Sauvegarde l'historique du vent en mémoire flash (NVS)
+  // Format : chaque événement = "heure,vitesse,cause|" concaténés
+  String data = "";
+  for (int i = 0; i < histRempli; i++) {
+    int idx = (histIndex - histRempli + i + NB_EVENEMENTS_VENT) % NB_EVENEMENTS_VENT;
+    data += histHeure[idx] + "," + String(histVitesse[idx], 1) + "," + histCause[idx] + "|";
+  }
+  prefs.putString("histVent", data);
+}
+
+void chargerHistoriqueVent() {
+  // Charge l'historique du vent depuis la mémoire flash (NVS)
+  String data = prefs.getString("histVent", "");
+  if (data.length() == 0) return; // aucun historique sauvegardé
+  
+  histIndex = 0;
+  histRempli = 0;
+  
+  int pos = 0;
+  while (pos < data.length()) {
+    int delim1 = data.indexOf(',', pos);
+    int delim2 = data.indexOf(',', delim1 + 1);
+    int delim3 = data.indexOf('|', delim2 + 1);
+    if (delim1 == -1 || delim2 == -1 || delim3 == -1) break;
+    
+    String h = data.substring(pos, delim1);
+    float v = data.substring(delim1 + 1, delim2).toFloat();
+    String c = data.substring(delim2 + 1, delim3);
+    
+    histHeure[histIndex] = h;
+    histVitesse[histIndex] = v;
+    histCause[histIndex] = c;
+    histIndex = (histIndex + 1) % NB_EVENEMENTS_VENT;
+    if (histRempli < NB_EVENEMENTS_VENT) histRempli++;
+    
+    pos = delim3 + 1;
+  }
+  histIndex = histRempli % NB_EVENEMENTS_VENT; // remet l'index au bon endroit
+  Serial.printf("Historique vent charge : %d evenements.\n", histRempli);
+}
+
+// --- Tendance du vent (augmentation / diminution) ---
+#define NB_ECHANTILLONS_TENDANCE 6      // 6 x FENETRE_VENT_MS (5s) = 30s de fenetre d'analyse
+#define SEUIL_TENDANCE_KMH        2.0   // ecart mini pour ne pas declencher sur du bruit
+float bufferVent[NB_ECHANTILLONS_TENDANCE];
+int bufferVentIndex = 0;
+int bufferVentRempli = 0;
+String tendanceVent = "stable"; // "up" / "down" / "stable"
+
+String calculerTendanceVent() {
+  if (bufferVentRempli < 4) return "stable"; // pas assez d'historique pour juger
+
+  int moitie = bufferVentRempli / 2;
+  float sommeAncien = 0, sommeRecent = 0;
+  int nAncien = 0, nRecent = 0;
+
+  for (int i = 0; i < bufferVentRempli; i++) {
+    int idx = (bufferVentIndex - bufferVentRempli + i + NB_ECHANTILLONS_TENDANCE) % NB_ECHANTILLONS_TENDANCE;
+    if (i < moitie) { sommeAncien += bufferVent[idx]; nAncien++; }
+    else            { sommeRecent += bufferVent[idx]; nRecent++; }
+  }
+
+  float diff = (sommeRecent / nRecent) - (sommeAncien / nAncien);
+  if (diff > SEUIL_TENDANCE_KMH)  return "up";
+  if (diff < -SEUIL_TENDANCE_KMH) return "down";
+  return "stable";
+}
+
+// Enregistre un evenement de mise en securite (moyenne ou rafale) dans l'historique circulaire
+// (definie plus bas, apres la declaration de rtc/rtcOK — voir juste apres RTC_DS3231 rtc;)
+
+void IRAM_ATTR compterImpulsionVent() {
+  unsigned long maintenant = millis();
+  if (maintenant - dernierImpulsionVent > DEBOUNCE_VENT_MS) {
+    nbImpulsionsVent++;
+    nbImpulsionsRafale++;
+    dernierImpulsionVent = maintenant;
+  }
+}
+
+void setupAnemometre() {
+  pinMode(PIN_ANEMOMETRE, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_ANEMOMETRE), compterImpulsionVent, FALLING);
+}
+
+void setupOTA() {
+  // Configure le flashage Over-The-Air (via WiFi)
+  ArduinoOTA.setHostname("tracker-solaire");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  
+  ArduinoOTA.onStart([]() {
+    Serial.println("\n=== OTA : debut du flashage ===");
+  });
+  
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\n=== OTA : flashage termine, redemarrage en cours ===");
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("OTA Progress: %u%%\r", (progress / (total / 100)));
+  });
+  
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("OTA Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+  
+  ArduinoOTA.begin();
+  Serial.println("OTA ready (port 3232, password: " OTA_PASSWORD ")");
+}
+
+void updateVent() {
+  if (millis() - lastMesureVent >= FENETRE_VENT_MS) {
+    noInterrupts();
+    unsigned long imp = nbImpulsionsVent;
+    nbImpulsionsVent = 0;
+    interrupts();
+
+    float impParSeconde = imp / (FENETRE_VENT_MS / 1000.0);
+    float nouvelleVitesse = impParSeconde * FACTEUR_KMH;
+    if (nouvelleVitesse > 0 || imp == 0) vitesseVentKmh = nouvelleVitesse;
+
+    bufferVent[bufferVentIndex] = vitesseVentKmh;
+    bufferVentIndex = (bufferVentIndex + 1) % NB_ECHANTILLONS_TENDANCE;
+    if (bufferVentRempli < NB_ECHANTILLONS_TENDANCE) bufferVentRempli++;
+    tendanceVent = calculerTendanceVent();
+
+    // Palier intermediaire : amplitude de mouvement reduite (avant le seuil de securite)
+    if (vitesseVentKmh >= SEUIL_VENT_REDUIT && !modeVentReduit) {
+      modeVentReduit = true;
+      Serial.printf("Vent modere (%.1f km/h) : amplitude de mouvement reduite.\n", vitesseVentKmh);
+    }
+    if (vitesseVentKmh < SEUIL_VENT_REDUIT * 0.8) {
+      modeVentReduit = false; // desactivation avec hysteresis
+    }
+
+    // Mise en securite sur vent moyen (fenetre 5s)
+    if (vitesseVentKmh >= SEUIL_VENT_SECURITE && !securiteVentActive) {
+      securiteVentActive = true;
+      Serial.printf("ALERTE VENT MOYEN : %.1f km/h - retour a plat automatique !\n", vitesseVentKmh);
+      enregistrerEvenementVent(vitesseVentKmh, "moyenne");
+    }
+    if (vitesseVentKmh < SEUIL_VENT_SECURITE * 0.8) {
+      securiteVentActive = false; // desactivation avec hysteresis
+    }
+
+    lastMesureVent = millis();
+  }
+}
+
+// Detection de rafale : fenetre courte (2s) independante de la moyenne 5s, pour
+// declencher la securite meme si un pic bref est lisse par la moyenne plus longue.
+void updateRafale() {
+  if (millis() - lastMesureRafale >= GUST_WINDOW_MS) {
+    noInterrupts();
+    unsigned long imp = nbImpulsionsRafale;
+    nbImpulsionsRafale = 0;
+    interrupts();
+
+    float impParSeconde = imp / (GUST_WINDOW_MS / 1000.0);
+    vitesseRafaleKmh = impParSeconde * FACTEUR_KMH;
+
+    if (vitesseRafaleKmh >= SEUIL_RAFALE_SECURITE && !securiteVentActive) {
+      securiteVentActive = true;
+      Serial.printf("ALERTE RAFALE : %.1f km/h (pic %ds) - retour a plat automatique !\n",
+                    vitesseRafaleKmh, GUST_WINDOW_MS / 1000);
+      enregistrerEvenementVent(vitesseRafaleKmh, "rafale");
+    }
+
+    lastMesureRafale = millis();
+  }
+}
+
+Adafruit_BMP280 bmp;
+RTC_DS3231 rtc;
+bool bmeOK = false;
+bool rtcOK = false;
+
+// Enregistre un evenement de mise en securite (moyenne ou rafale) dans l'historique circulaire
+void enregistrerEvenementVent(float vitesse, const char* cause) {
+  String heureStr = "??:??:??";
+  if (rtcOK) {
+    DateTime now = rtc.now();
+    char buf[9];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+    heureStr = String(buf);
+  }
+  histHeure[histIndex]   = heureStr;
+  histVitesse[histIndex] = vitesse;
+  histCause[histIndex]   = String(cause);
+  histIndex = (histIndex + 1) % NB_EVENEMENTS_VENT;
+  if (histRempli < NB_EVENEMENTS_VENT) histRempli++;
+  
+  // Sauvegarde l'historique immediatement en mémoire flash (NVS)
+  sauvegarderHistoriqueVent();
+}
+
+bool setupCapteursI2C() {
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.setClock(50000); // vitesse reduite, plus tolerante au bruit electrique
+  delay(100); // laisse le bus/les capteurs se stabiliser
+
+  for (int essai = 0; essai < 3 && !bmeOK; essai++) {
+    bmeOK = bmp.begin(0x76, 0x58); // chip ID 0x58 = clone BMP280 HW-611
+    if (!bmeOK) bmeOK = bmp.begin(0x77, 0x58);
+    if (!bmeOK) delay(100);
+  }
+  if (bmeOK) {
+    bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                    Adafruit_BMP280::SAMPLING_X2,
+                    Adafruit_BMP280::SAMPLING_X16,
+                    Adafruit_BMP280::FILTER_X16,
+                    Adafruit_BMP280::STANDBY_MS_500);
+  }
+  Wire.begin(PIN_SDA, PIN_SCL); // re-force les broches
+  if (bmeOK) Serial.println("BMP280 detecte.");
+  else Serial.println("BMP280 NON detecte (verifie le cablage/adresse).");
+
+  rtcOK = rtc.begin(&Wire);
+  Wire.begin(PIN_SDA, PIN_SCL); // re-force les broches (rtc.begin peut les reinitialiser)
+  if (rtcOK) Serial.println("RTC DS3231 detectee.");
+  else Serial.println("RTC NON detectee (verifie le cablage).");
+
+  return bmeOK || rtcOK;
+}
+
+// Regle la RTC depuis un serveur NTP (appele une fois si le WiFi est up)
+void synchroniserRTCDepuisNTP() {
+  if (!rtcOK || WiFi.status() != WL_CONNECTED) return;
+
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 8000)) {
+    rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                         timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
+    Serial.println("RTC synchronisee via NTP (UTC).");
+  } else {
+    Serial.println("Echec synchro NTP, la RTC garde son heure actuelle.");
+  }
+}
+
+void setupMoteurs() {
+  ledcAttach(RPWM_INC, PWM_FREQ, PWM_RES);
+  ledcAttach(LPWM_INC, PWM_FREQ, PWM_RES);
+  ledcAttach(RPWM_AZ, PWM_FREQ, PWM_RES);
+  ledcAttach(LPWM_AZ, PWM_FREQ, PWM_RES);
+  ledcWrite(RPWM_INC, 0);
+  ledcWrite(LPWM_INC, 0);
+  ledcWrite(RPWM_AZ, 0);
+  ledcWrite(LPWM_AZ, 0);
+}
+
+void driveInclinaison(int8_t sens, uint8_t vitesse) {
+  if (sens > 0)      { ledcWrite(RPWM_INC, vitesse); ledcWrite(LPWM_INC, 0); }
+  else if (sens < 0) { ledcWrite(RPWM_INC, 0); ledcWrite(LPWM_INC, vitesse); }
+  else               { ledcWrite(RPWM_INC, 0); ledcWrite(LPWM_INC, 0); }
+}
+
+void driveAzimut(int8_t sens, uint8_t vitesse) {
+  if (sens > 0)      { ledcWrite(RPWM_AZ, vitesse); ledcWrite(LPWM_AZ, 0); }
+  else if (sens < 0) { ledcWrite(RPWM_AZ, 0); ledcWrite(LPWM_AZ, vitesse); }
+  else               { ledcWrite(RPWM_AZ, 0); ledcWrite(LPWM_AZ, 0); }
+}
+
+// ============================================================
+// POTENTIOMETRE 3B3 : inclinaison REELLE
+// ============================================================
+
+#define PIN_POT_CANAL_A     36
+#define PIN_POT_CANAL_B     39
+#define NB_ECHANTILLONS_POT  8
+
+#define POT_A_0DEG    3918
+#define POT_A_40DEG    269
+#define POT_B_0DEG     137
+#define POT_B_40DEG   3684
+#define POT_ANGLE_MAX_DEG  40.0
+
+int lireBrutFiltre(int pin) {
+  long somme = 0;
+  for (int i = 0; i < NB_ECHANTILLONS_POT; i++) { somme += analogRead(pin); delay(1); }
+  return somme / NB_ECHANTILLONS_POT;
+}
+
+double brutVersDegres(int brut, int brut0Deg, int brut40Deg) {
+  return (double)(brut - brut0Deg) * POT_ANGLE_MAX_DEG / (double)(brut40Deg - brut0Deg);
+}
+
+double lireInclinaisonReelle() {
+  int brutA = lireBrutFiltre(PIN_POT_CANAL_A);
+  int brutB = lireBrutFiltre(PIN_POT_CANAL_B);
+  double degA = brutVersDegres(brutA, POT_A_0DEG, POT_A_40DEG);
+  double degB = brutVersDegres(brutB, POT_B_0DEG, POT_B_40DEG);
+  return (degA + degB) / 2.0;
+}
+
+// ============================================================
+// AZIMUT : estimation (pas de codeur integre a ce programme)
+// ============================================================
+
+double azimutEstimeDeg = 0.0;
+double vitesseAzimutDegS = 4.0;
+unsigned long lastAzimutUpdate = 0;
+int8_t sensAzimutActuel = 0;
+
+void updateEstimationAzimut() {
+  unsigned long now = millis();
+  double dt = (now - lastAzimutUpdate) / 1000.0;
+  lastAzimutUpdate = now;
+  if (sensAzimutActuel != 0) {
+    azimutEstimeDeg += vitesseAzimutDegS * sensAzimutActuel * dt;
+  }
+}
+
+// ============================================================
+// SERVEUR WEB - ETAT DES COMMANDES
+// ============================================================
+
+WebServer server(80);
+
+String etatVertical   = "STOP";
+String etatHorizontal = "STOP";
+
+unsigned long arretAutoVerticalAt   = 0;
+unsigned long arretAutoHorizontalAt = 0;
+
+bool retourAPlatActif = false;
+#define RETOUR_A_PLAT_TOLERANCE_DEG  0.5
+#define RETOUR_A_PLAT_VITESSE        180
+
+// ============================================================
+// METEO EN LIGNE (Open-Meteo, gratuit, sans cle)
+// ============================================================
+
+float meteoTemperatureC   = 0;
+float meteoVentKmh        = 0;
+float meteoPressionHpa    = 0;
+int   meteoProbaPluiePct  = 0;
+bool  meteoValide          = false;
+unsigned long meteoDerniereMaj = 0;
+#define METEO_INTERVAL_MS  600000UL
+
+void fetchMeteo() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  String url = "http://api.open-meteo.com/v1/forecast?latitude=" + String(LATITUDE_DEG, 4) +
+               "&longitude=" + String(LONGITUDE_DEG, 4) +
+               "&current=temperature_2m,wind_speed_10m,surface_pressure" +
+               "&hourly=precipitation_probability&forecast_hours=3&timezone=auto";
+
+  http.begin(url);
+  int code = http.GET();
+
+  if (code == 200) {
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (!err) {
+      meteoTemperatureC  = doc["current"]["temperature_2m"] | 0.0;
+      meteoVentKmh       = doc["current"]["wind_speed_10m"] | 0.0;
+      meteoPressionHpa   = doc["current"]["surface_pressure"] | 0.0;
+      meteoProbaPluiePct = doc["hourly"]["precipitation_probability"][1] | 0;
+      meteoValide = true;
+      meteoDerniereMaj = millis();
+      Serial.println("Meteo mise a jour.");
+    } else {
+      Serial.println("Erreur parsing JSON meteo.");
+    }
+  } else {
+    Serial.printf("Erreur requete meteo, code HTTP: %d\n", code);
+  }
+  http.end();
+}
+
+// ============================================================
+// HANDLERS - AXE VERTICAL (inclinaison)
+// ============================================================
+
+void handleMonter() {
+  retourAPlatActif = false;
+  if (modeVentReduit && lireInclinaisonReelle() >= ANGLE_MAX_VENT_REDUIT_DEG) {
+    etatVertical = "STOP";
+    driveInclinaison(1, 0);
+    Serial.println("MONTER refuse : amplitude limitee par vent modere (>=40 km/h).");
+    server.sendHeader("Location", "/"); server.send(303);
+    return;
+  }
+  etatVertical = "MONTER";
+  driveInclinaison(1, modeVentReduit ? VITESSE_REDUITE : VITESSE_MANUELLE);
+  arretAutoVerticalAt = millis() + DUREE_MAX_MS;
+  Serial.println("Commande reçue : MONTER");
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+void handleStopVertical() {
+  retourAPlatActif = false;
+  etatVertical = "STOP";
+  driveInclinaison(1, 0);
+  arretAutoVerticalAt = 0;
+  Serial.println("Commande reçue : STOP (vertical)");
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+void handleDescendre() {
+  retourAPlatActif = false;
+  etatVertical = "DESCENDRE";
+  driveInclinaison(-1, modeVentReduit ? VITESSE_REDUITE : VITESSE_MANUELLE);
+  arretAutoVerticalAt = millis() + DUREE_MAX_MS;
+  Serial.println("Commande reçue : DESCENDRE");
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+void handleRetourAPlat() {
+  retourAPlatActif = true;
+  etatVertical = "RETOUR A PLAT";
+  arretAutoVerticalAt = 0;
+  Serial.println("Commande reçue : RETOUR A PLAT");
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+// ============================================================
+// HANDLERS - AXE HORIZONTAL (azimut)
+// ============================================================
+
+void handleGauche() {
+  etatHorizontal = "GAUCHE";
+  driveAzimut(-1, modeVentReduit ? VITESSE_REDUITE : VITESSE_MANUELLE);
+  sensAzimutActuel = -1;
+  arretAutoHorizontalAt = millis() + DUREE_MAX_MS;
+  Serial.println("Commande reçue : GAUCHE");
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+void handleStopHorizontal() {
+  etatHorizontal = "STOP";
+  driveAzimut(1, 0);
+  sensAzimutActuel = 0;
+  arretAutoHorizontalAt = 0;
+  Serial.println("Commande reçue : STOP (horizontal)");
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+void handleDroite() {
+  etatHorizontal = "DROITE";
+  driveAzimut(1, modeVentReduit ? VITESSE_REDUITE : VITESSE_MANUELLE);
+  sensAzimutActuel = 1;
+  arretAutoHorizontalAt = millis() + DUREE_MAX_MS;
+  Serial.println("Commande reçue : DROITE");
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+// ============================================================
+// STATUT JSON
+// ============================================================
+
+void handleStatus() {
+  double inclinaisonReelle = lireInclinaisonReelle();
+  double azNorm = fmod(azimutEstimeDeg, 360.0);
+  if (azNorm < 0) azNorm += 360.0;
+
+  long secV = (arretAutoVerticalAt != 0) ? (long)((arretAutoVerticalAt - millis()) / 1000) : 0;
+  long secH = (arretAutoHorizontalAt != 0) ? (long)((arretAutoHorizontalAt - millis()) / 1000) : 0;
+  if (secV < 0) secV = 0;
+  if (secH < 0) secH = 0;
+
+  JsonDocument doc;
+  doc["az"] = azNorm;
+  doc["incl"] = inclinaisonReelle;
+  doc["etatV"] = etatVertical;
+  doc["etatH"] = etatHorizontal;
+  doc["secV"] = secV;
+  doc["secH"] = secH;
+  doc["uptime"] = millis() / 1000;
+  doc["rssi"] = WiFi.RSSI();
+  doc["meteoValide"] = meteoValide;
+  doc["temp"] = meteoTemperatureC;
+  doc["vent"] = meteoVentKmh;
+  doc["pression"] = meteoPressionHpa;
+  doc["pluie"] = meteoProbaPluiePct;
+  doc["meteoAge"] = meteoValide ? (millis() - meteoDerniereMaj) / 1000 : 0;
+
+  doc["bmeOK"] = bmeOK;
+  if (bmeOK) {
+    doc["pressionLocale"] = bmp.readPressure() / 100.0;
+    doc["temperatureLocale"] = bmp.readTemperature();
+    doc["humiditeLocale"] = -1; // BMP280 ne mesure pas l'humidite
+  }
+
+  doc["rtcOK"] = rtcOK;
+  doc["ventKmh"] = vitesseVentKmh;
+  doc["ventRafaleKmh"] = vitesseRafaleKmh;
+  doc["securiteVent"] = securiteVentActive;
+  doc["modeVentReduit"] = modeVentReduit;
+  doc["trend"] = tendanceVent;
+  if (rtcOK) {
+    DateTime now = rtc.now();
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+             now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+    doc["heureRTC"] = buf;
+  }
+
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+// ============================================================
+// HISTORIQUE DES EVENEMENTS VENT (dernieres mises en securite)
+// ============================================================
+void handleHistoriqueVent() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (int i = 0; i < histRempli; i++) {
+    int idx = (histIndex - histRempli + i + NB_EVENEMENTS_VENT) % NB_EVENEMENTS_VENT;
+    JsonObject o = arr.add<JsonObject>();
+    o["h"] = histHeure[idx];
+    o["v"] = histVitesse[idx];
+    o["c"] = histCause[idx];
+  }
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+// ============================================================
+// PAGE WEB PRINCIPALE
+// ============================================================
+
+void handleRoot() {
+  String page;
+  page += "<!DOCTYPE html><html><head>";
+  page += "<meta charset='UTF-8'>";
+  page += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  page += "<title>Tracker Solaire</title>";
+  page += "<style>";
+  page += "*{box-sizing:border-box;}";
+  page += "body{font-family:Arial,Helvetica,sans-serif;background:#0f1420;color:#e4e8ee;text-align:left;padding:0;margin:0;}";
+  page += "header{background:#181f2b;color:white;padding:16px 24px;display:flex;";
+  page += "justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;";
+  page += "border-bottom:1px solid #2a3346;}";
+  page += "header h1{font-size:20px;margin:0;} header p{margin:2px 0 0;font-size:12px;color:#9aa5b1;}";
+  page += "#statutWifi{display:flex;align-items:center;gap:6px;font-size:13px;color:#c7cedb;}";
+  page += "#pointWifi{width:9px;height:9px;border-radius:50%;background:#4CAF50;display:inline-block;}";
+  page += ".dashboard{display:grid;gap:34px;max-width:1900px;margin:20px auto;padding:0 16px;";
+  page += "grid-template-columns:1fr;grid-template-areas:'camera' 'incl' 'az' 'meteo';}";
+  page += "@media(min-width:1000px){.dashboard{grid-template-columns:280px minmax(650px,1fr) 280px;";
+  page += "grid-template-areas:'incl camera az' '. meteo .';align-items:start;}}";
+  page += ".card{background:#1a2130;padding:20px;border-radius:14px;";
+  page += "box-shadow:0 2px 10px rgba(0,0,0,0.4);border:1px solid #262f42;}";
+  page += ".card h2{margin-top:0;font-size:16px;color:#e4e8ee;border-bottom:1px solid #2a3346;padding-bottom:8px;}";
+  page += ".center{text-align:center;}";
+  page += ".cam{grid-area:camera;background:#eef1f4;} .incl{grid-area:incl;} .az{grid-area:az;} .met{grid-area:meteo;}";
+  page += ".cam h2{color:#1a2130;border-bottom-color:#d5dbe1;}";
+  page += ".cam p{color:#1a2130;} .cam .petit{color:#5a6472;}";
+  page += "button{width:130px;height:50px;font-size:16px;margin:5px;border-radius:9px;border:none;cursor:pointer;}";
+  page += ".up{background:#4CAF50;color:white;} .stop{background:#FF9800;color:white;}";
+  page += ".down{background:#F44336;color:white;} .left{background:#2196F3;color:white;}";
+  page += ".right{background:#2196F3;color:white;} .flat{background:#9C27B0;color:white;width:225px;}";
+  page += "table{width:100%;font-size:14px;border-collapse:collapse;color:#e4e8ee;}";
+  page += "td{padding:6px 4px;text-align:left;border-bottom:1px solid #262f42;}";
+  page += ".alerte{color:#FF6B6B;font-weight:bold;}";
+  page += ".axeRow{display:flex;justify-content:center;flex-wrap:wrap;}";
+  page += ".badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;color:white;margin-left:6px;}";
+  page += ".mesure{background:#4CAF50;} .estime{background:#FF9800;}";
+  page += "#threeWrap{width:100%;height:540px;margin:10px auto;border-radius:10px;overflow:hidden;background:#e9ecf0;}";
+  page += ".ventVoyants{display:flex;align-items:center;gap:16px;margin:14px 0;padding-top:10px;border-top:1px solid #262f42;}";
+  page += ".ventLampGroup{display:flex;flex-direction:column;align-items:center;gap:4px;}";
+  page += ".ventLamp{width:18px;height:18px;border-radius:50%;background:#2a3346;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);}";
+  page += ".ventLamp.on-green{background:#4CAF50;box-shadow:0 0 10px 2px rgba(76,175,80,0.6);}";
+  page += ".ventLamp.on-orange{background:#FF9800;box-shadow:0 0 10px 2px rgba(255,152,0,0.6);animation:ventBlink 0.8s steps(1) infinite;}";
+  page += ".ventLamp.on-red{background:#F44336;box-shadow:0 0 10px 2px rgba(244,67,54,0.6);}";
+  page += "@keyframes ventBlink{50%{opacity:0.15;box-shadow:none;}}";
+  page += ".ventLampLbl{font-size:10px;color:#9aa5b1;}";
+  page += ".ventTrend{font-size:20px;font-weight:bold;margin-left:4px;}";
+  page += ".ventTrend.up{color:#FF9800;} .ventTrend.down{color:#2196F3;} .ventTrend.stable{color:#9aa5b1;}";
+  page += "</style></head><body>";
+
+  page += "<header>";
+  page += "<div><h1>☀️ TRACKER SOLAIRE</h1><p>Contrôle et monitoring</p></div>";
+  page += "<div id='statutWifi'><span id='pointWifi'></span><span id='infoLigne'>--</span>";
+  page += "<span id='heureLigne' style='margin-left:10px;'></span></div>";
+  page += "</header>";
+
+  page += "<div class='dashboard'>";
+
+  page += "<div class='card center incl'><h2>Inclinaison</h2>";
+  page += "<div class='axeRow'>";
+  page += "<button class='up' onclick=\"cmd('/monter')\">▲ MONTER ▲</button>";
+  page += "<button class='down' onclick=\"cmd('/descendre')\">▼ DESCENDRE ▼</button>";
+  page += "</div>";
+  page += "<p>État : <span id='etatV'>--</span><span id='secV'></span></p>";
+  page += "<div class='axeRow'>";
+  page += "<button class='stop' onclick=\"cmd('/stop_vertical')\">■ STOP ■</button>";
+  page += "<button class='flat' onclick=\"cmd('/retour_a_plat')\">⟲ RETOUR A PLAT (0°)</button>";
+  page += "</div></div>";
+
+  page += "<div class='card center cam'>";
+  page += "<h2>Modèle 3D du tracker</h2>";
+  page += "<div id='threeWrap'></div>";
+  page += "<p class='petit'>Glisse pour tourner la vue, molette/pincement pour zoomer</p>";
+  page += "<p class='petit' style='color:#c0392b;'>Reglage temporaire azimut (a supprimer une fois valide) :</p>";
+  page += "<p class='petit'>Offset : <span id='offsetVal'>-90</span>&deg;</p>";
+  page += "<input type='range' id='offsetSlider' min='-180' max='180' value='-90' step='5' style='width:80%;' ";
+  page += "oninput=\"offsetDebug=parseInt(this.value); document.getElementById('offsetVal').textContent=this.value;\">";
+  page += "<p><b><span id='azVal'>--</span> °</b> azimut &nbsp;|&nbsp; ";
+  page += "<b><span id='inclVal'>--</span> °</b> inclinaison</p>";
+  page += "<p><span class='badge estime'>AZIMUT ESTIME</span> <span class='badge mesure'>INCLINAISON MESUREE</span></p>";
+  page += "</div>";
+
+  page += "<div class='card center az'><h2>Azimut</h2>";
+  page += "<div class='axeRow'>";
+  page += "<button class='left' onclick=\"cmd('/gauche')\">◀ GAUCHE</button>";
+  page += "<button class='right' onclick=\"cmd('/droite')\">DROITE ▶</button>";
+  page += "</div>";
+  page += "<p>État : <span id='etatH'>--</span><span id='secH'></span></p>";
+  page += "<button class='stop' onclick=\"cmd('/stop_horizontal')\">■ STOP ■</button>";
+  page += "</div>";
+
+  page += "<div class='card met'><h2>Météo (Open-Meteo, régionale)</h2>";
+  page += "<table>";
+  page += "<tr><td>Température</td><td><span id='temp'>--</span> °C</td></tr>";
+  page += "<tr><td>Vent (régional)</td><td><span id='vent'>--</span> km/h</td></tr>";
+  page += "<tr><td>Vent (local)</td><td><span id='ventLocal'>--</span> km/h</td></tr>";
+  page += "<tr><td>Sécurité vent</td><td><span id='securiteVent'>--</span></td></tr>";
+  page += "<tr><td>Pression</td><td><span id='pression'>--</span> hPa</td></tr>";
+  page += "<tr><td>Pression locale</td><td><span id='pressionLocale'>--</span></td></tr>";
+  page += "</table>";
+  page += "<div class='ventVoyants'>";
+  page += "<div class='ventLampGroup'><span class='ventLamp' id='ventLampGreen'></span><span class='ventLampLbl'>0-20</span></div>";
+  page += "<div class='ventLampGroup'><span class='ventLamp' id='ventLampOrange'></span><span class='ventLampLbl'>20-40</span></div>";
+  page += "<div class='ventLampGroup'><span class='ventLamp' id='ventLampRed'></span><span class='ventLampLbl'>&gt;40 km/h</span></div>";
+  page += "<span class='ventTrend stable' id='ventTrendArrow'>–</span>";
+  page += "</div>";
+  page += "<p class='petit' id='ventRafaleTxt'></p>";
+  page += "<p class='petit' id='modeVentReduitTxt'></p>";
+  page += "<div id='histVentBox' style='display:none;'><p class='petit'><b>Historique sécurité vent :</b></p>";
+  page += "<ul id='histVentList' style='margin:4px 0 0 18px;padding:0;font-size:11px;color:#9aa5b1;'></ul></div>";
+  page += "<p id='pluieTxt'>Risque de pluie : -- %</p>";
+  page += "<p class='petit'>Mise à jour il y a <span id='meteoAge'>--</span>s. Vent/pression : source en ligne, pas encore de capteur local.</p>";
+  page += "</div>";
+
+  page += "</div>";
+
+  page += "<p class='petit center' style='margin-bottom:20px;'>Mise à jour automatique toutes les secondes.</p>";
+
+  page += "<script src='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'></script>";
+  page += "<script src='https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js'></script>";
+  page += "<script>";
+
+  page += "var wrap=document.getElementById('threeWrap');";
+  page += "var scene=new THREE.Scene(); scene.background=new THREE.Color(0xe9ecf0);";
+  page += "var camera=new THREE.PerspectiveCamera(45, wrap.clientWidth/wrap.clientHeight, 0.1, 100);";
+  page += "camera.position.set(4.6,3.3,5.1);";
+  page += "var renderer=new THREE.WebGLRenderer({antialias:true});";
+  page += "renderer.setSize(wrap.clientWidth, wrap.clientHeight);";
+  page += "renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;";
+  page += "wrap.appendChild(renderer.domElement);";
+
+  page += "var controls=new THREE.OrbitControls(camera, renderer.domElement);";
+  page += "controls.enableDamping=true; controls.dampingFactor=0.08;";
+  page += "controls.target.set(0,1.1,0); controls.minDistance=3; controls.maxDistance=13;";
+  page += "controls.maxPolarAngle=Math.PI/2 - 0.02;";
+
+  page += "scene.add(new THREE.AmbientLight(0xffffff,0.55));";
+  page += "var sun=new THREE.DirectionalLight(0xffffff,0.9);";
+  page += "sun.position.set(4,6,3); sun.castShadow=true;";
+  page += "sun.shadow.mapSize.set(1024,1024);";
+  page += "sun.shadow.camera.left=-5.5; sun.shadow.camera.right=5.5;";
+  page += "sun.shadow.camera.top=5.5; sun.shadow.camera.bottom=-5.5;";
+  page += "scene.add(sun);";
+
+  page += "var ground=new THREE.Mesh(new THREE.CircleGeometry(4.4,32),";
+  page += "new THREE.MeshStandardMaterial({color:0x6b8f52}));";
+  page += "ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);";
+
+  page += "var socle=new THREE.Mesh(new THREE.BoxGeometry(0.55,0.28,0.55),";
+  page += "new THREE.MeshStandardMaterial({color:0xaaa89c,roughness:0.9}));";
+  page += "socle.position.y=0.14; socle.castShadow=true; socle.receiveShadow=true; scene.add(socle);";
+
+  page += "var poleMat=new THREE.MeshStandardMaterial({color:0x15171c,metalness:0.4,roughness:0.5});";
+  page += "var pole=new THREE.Mesh(new THREE.BoxGeometry(0.16,1.0,0.16), poleMat);";
+  page += "pole.position.y=0.28+0.5; pole.castShadow=true; scene.add(pole);";
+
+  page += "var azimutGroup=new THREE.Object3D(); azimutGroup.position.y=1.28; scene.add(azimutGroup);";
+
+  page += "var moteurAz=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.16,0.22),";
+  page += "new THREE.MeshStandardMaterial({color:0x111318}));";
+  page += "moteurAz.castShadow=true; azimutGroup.add(moteurAz);";
+
+  page += "var panelPivot=new THREE.Object3D(); panelPivot.position.y=0.1; azimutGroup.add(panelPivot);";
+
+  page += "var moteurIncl=new THREE.Mesh(new THREE.BoxGeometry(0.16,0.16,0.16),";
+  page += "new THREE.MeshStandardMaterial({color:0x333333}));";
+  page += "panelPivot.add(moteurIncl);";
+
+  page += "var panelMat=new THREE.MeshStandardMaterial({color:0x22252b,metalness:0.3,roughness:0.55});";
+  page += "var cadreMat=new THREE.LineBasicMaterial({color:0x000000});";
+  page += "var panelW=4.0, panelD=3.6, cols=4, rows=2, gap=0.04;";
+  page += "var cellW=panelW/cols - gap, cellD=panelD/rows - gap;";
+  page += "for(var c=0;c<cols;c++){for(var r=0;r<rows;r++){";
+  page += "var px=-panelW/2 + cellW/2 + c*(panelW/cols);";
+  page += "var pz=-panelD/2 + cellD/2 + r*(panelD/rows);";
+  page += "var geo=new THREE.BoxGeometry(cellW,0.03,cellD);";
+  page += "var m=new THREE.Mesh(geo, panelMat);";
+  page += "m.position.set(px,0,pz); m.castShadow=true; m.receiveShadow=true;";
+  page += "panelPivot.add(m);";
+  page += "var edges=new THREE.LineSegments(new THREE.EdgesGeometry(geo), cadreMat);";
+  page += "edges.position.set(px,0,pz); panelPivot.add(edges);";
+  page += "}}";
+
+  page += "var tube=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,panelD,12),";
+  page += "new THREE.MeshStandardMaterial({color:0x14161a,metalness:0.5,roughness:0.4}));";
+  page += "tube.rotation.x=Math.PI/2; tube.castShadow=true; panelPivot.add(tube);";
+
+  page += "var azCible=0, inclCible=0, offsetDebug=-90;";
+  page += "function animate(){requestAnimationFrame(animate);";
+  page += "azimutGroup.rotation.y += (THREE.MathUtils.degToRad(azCible+offsetDebug) - azimutGroup.rotation.y)*0.08;";
+  page += "panelPivot.rotation.x += (THREE.MathUtils.degToRad(-inclCible) - panelPivot.rotation.x)*0.08;";
+  page += "controls.update(); renderer.render(scene,camera);}";
+  page += "animate();";
+
+  page += "window.addEventListener('resize',function(){";
+  page += "camera.aspect=wrap.clientWidth/wrap.clientHeight; camera.updateProjectionMatrix();";
+  page += "renderer.setSize(wrap.clientWidth, wrap.clientHeight);});";
+
+  page += "function cmd(url){fetch(url).then(refresh);}";
+  page += "function refresh(){";
+  page += "fetch('/status').then(r=>r.json()).then(d=>{";
+  page += "azCible=d.az; inclCible=d.incl;";
+  page += "document.getElementById('azVal').textContent=d.az.toFixed(1);";
+  page += "document.getElementById('inclVal').textContent=d.incl.toFixed(1);";
+  page += "document.getElementById('etatV').textContent=d.etatV;";
+  page += "document.getElementById('etatH').textContent=d.etatH;";
+  page += "document.getElementById('secV').textContent=(d.secV>0)?' (arret auto dans '+d.secV+'s)':'';";
+  page += "document.getElementById('secH').textContent=(d.secH>0)?' (arret auto dans '+d.secH+'s)':'';";
+  page += "document.getElementById('infoLigne').textContent='Uptime: '+d.uptime+'s | WiFi: '+d.rssi+' dBm';";
+  page += "document.getElementById('heureLigne').textContent=d.rtcOK ? ('| '+d.heureRTC+' (RTC)') : '| RTC indisponible';";
+  page += "var lg=document.getElementById('ventLampGreen'),lo=document.getElementById('ventLampOrange'),lr=document.getElementById('ventLampRed');";
+  page += "lg.className='ventLamp'; lo.className='ventLamp'; lr.className='ventLamp';";
+  page += "if(d.ventKmh<20){lg.classList.add('on-green');}else if(d.ventKmh<40){lo.classList.add('on-orange');}else{lr.classList.add('on-red');}";
+  page += "var ta=document.getElementById('ventTrendArrow'); ta.className='ventTrend';";
+  page += "if(d.trend=='up'){ta.textContent='↑';ta.classList.add('up');}";
+  page += "else if(d.trend=='down'){ta.textContent='↓';ta.classList.add('down');}";
+  page += "else{ta.textContent='→';ta.classList.add('stable');}";
+  page += "document.getElementById('ventRafaleTxt').textContent='Pic (2s) : '+d.ventRafaleKmh.toFixed(1)+' km/h';";
+  page += "var mrTxt=document.getElementById('modeVentReduitTxt');";
+  page += "mrTxt.textContent = d.modeVentReduit ? '⚠ Vent modéré — amplitude de mouvement limitée (≤20°)' : '';";
+  page += "mrTxt.style.color = d.modeVentReduit ? '#FF9800' : '';";
+  page += "var pLoc=document.getElementById('pressionLocale');";
+  page += "if(pLoc){ if(d.bmeOK){ pLoc.textContent=d.pressionLocale.toFixed(1)+' hPa | '+d.temperatureLocale.toFixed(1)+'°C (local, alt ~729m)'; }";
+  page += "else{ pLoc.textContent='capteur BMP280 non detecte'; } }";
+  page += "var vl=document.getElementById('ventLocal');";
+  page += "if(vl) vl.textContent=d.ventKmh.toFixed(1);";
+  page += "var sv=document.getElementById('securiteVent');";
+  page += "if(sv){ sv.textContent=d.securiteVent ? '⚠ VENT FORT - retour a plat en cours' : 'OK';";
+  page += "sv.style.color=d.securiteVent ? '#FF6B6B' : '#4CAF50'; }";
+  page += "if(d.meteoValide){";
+  page += "document.getElementById('temp').textContent=d.temp.toFixed(1);";
+  page += "document.getElementById('vent').textContent=d.vent.toFixed(1);";
+  page += "document.getElementById('pression').textContent=d.pression.toFixed(0);";
+  page += "document.getElementById('meteoAge').textContent=d.meteoAge;";
+  page += "var p=document.getElementById('pluieTxt');";
+  page += "if(d.pluie>=50){p.innerHTML='⚠ Risque de pluie dans l\\'heure ('+d.pluie+'%)';p.className='alerte';}";
+  page += "else{p.innerHTML='Risque de pluie (heure suivante) : '+d.pluie+'%';p.className='';}";
+  page += "}";
+  page += "});}";
+  page += "refresh();setInterval(refresh,1000);";
+  page += "function rafraichirHistoriqueVent(){";
+  page += "fetch('/api/historique-vent').then(r=>r.json()).then(list=>{";
+  page += "var box=document.getElementById('histVentBox'), ul=document.getElementById('histVentList');";
+  page += "if(!list.length){box.style.display='none';return;}";
+  page += "box.style.display='block'; ul.innerHTML='';";
+  page += "list.slice().reverse().forEach(e=>{";
+  page += "var li=document.createElement('li');";
+  page += "li.textContent=e.h+' — '+e.v.toFixed(1)+' km/h ('+(e.c=='rafale'?'rafale':'moyenne')+')';";
+  page += "ul.appendChild(li);";
+  page += "});";
+  page += "}).catch(()=>{});";
+  page += "}";
+  page += "rafraichirHistoriqueVent();setInterval(rafraichirHistoriqueVent,15000);";
+  page += "</script>";
+
+  page += "</body></html>";
+
+  server.send(200, "text/html; charset=UTF-8", page);
+}
+
+// ============================================================
+// CONNEXION WIFI
+// ============================================================
+
+bool connectWiFi() {
+  Serial.println("\nConnexion au WiFi...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi CONNECTÉ ! IP : ");
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+  Serial.println("ÉCHEC WiFi");
+  return false;
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  setupMoteurs();
+  lastAzimutUpdate = millis();
+  setupAnemometre();
+  lastMesureVent = millis();
+  setupCapteursI2C();
+
+  // Charge l'historique du vent depuis la mémoire flash
+  prefs.begin("tracker", false);
+  chargerHistoriqueVent();
+
+  if (!connectWiFi()) return;
+
+  synchroniserRTCDepuisNTP();
+
+  if (MDNS.begin("tracker")) {
+    Serial.println("mDNS actif : accessible aussi via http://tracker.local");
+  } else {
+    Serial.println("mDNS non demarre (utilise l'adresse IP directement).");
+  }
+
+  fetchMeteo();
+  
+  // Configure le flashage Over-The-Air (OTA)
+  setupOTA();
+
+  server.on("/", handleRoot);
+  server.on("/status", handleStatus);
+  server.on("/api/historique-vent", handleHistoriqueVent);
+  server.on("/monter", handleMonter);
+  server.on("/stop_vertical", handleStopVertical);
+  server.on("/descendre", handleDescendre);
+  server.on("/retour_a_plat", handleRetourAPlat);
+  server.on("/gauche", handleGauche);
+  server.on("/stop_horizontal", handleStopHorizontal);
+  server.on("/droite", handleDroite);
+  server.begin();
+
+  Serial.print("Serveur Web démarré ! Ouvre : http://");
+  Serial.println(WiFi.localIP());
+}
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop() {
+  server.handleClient();
+  ArduinoOTA.handle();  // Traite les demandes de flashage OTA
+  updateEstimationAzimut();
+
+  if (arretAutoVerticalAt != 0 && millis() > arretAutoVerticalAt) {
+    etatVertical = "STOP";
+    driveInclinaison(1, 0);
+    arretAutoVerticalAt = 0;
+    Serial.println("Arret automatique (securite vertical)");
+  }
+  if (arretAutoHorizontalAt != 0 && millis() > arretAutoHorizontalAt) {
+    etatHorizontal = "STOP";
+    driveAzimut(1, 0);
+    sensAzimutActuel = 0;
+    arretAutoHorizontalAt = 0;
+    Serial.println("Arret automatique (securite horizontal)");
+  }
+
+  static unsigned long lastRetourCheck = 0;
+  if (retourAPlatActif && millis() - lastRetourCheck >= 200) {
+    lastRetourCheck = millis();
+    double actuel = lireInclinaisonReelle();
+    double erreur = 0.0 - actuel;
+
+    if (fabs(erreur) < RETOUR_A_PLAT_TOLERANCE_DEG) {
+      driveInclinaison(1, 0);
+      retourAPlatActif = false;
+      etatVertical = "STOP (a plat)";
+      Serial.println("Retour a plat termine.");
+    } else {
+      int8_t sens = (erreur > 0) ? 1 : -1;
+      driveInclinaison(sens, RETOUR_A_PLAT_VITESSE);
+    }
+  }
+
+  if (millis() - meteoDerniereMaj >= METEO_INTERVAL_MS) {
+    fetchMeteo();
+  }
+
+  static unsigned long lastHeartbeat = 0;
+  updateVent();
+  updateRafale();
+
+  // Securite vent : retour a plat automatique si vent trop fort
+  if (securiteVentActive && !retourAPlatActif) {
+    retourAPlatActif = true;
+    etatVertical = "RETOUR A PLAT (VENT)";
+    arretAutoVerticalAt = 0;
+  }
+  if (millis() - lastHeartbeat >= 60000) {
+    lastHeartbeat = millis();
+    Serial.printf("[vivant] uptime: %lus | IP: %s\n",
+                  millis() / 1000, WiFi.localIP().toString().c_str());
+  }
+}

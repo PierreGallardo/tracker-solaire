@@ -1,0 +1,33 @@
+# Compilation et flashage OTA du firmware du tracker.
+#
+#   docker compose build                                   (1 fois, long)
+#   docker compose run --rm tracker-build                  (compile)
+#   docker compose --profile flash run --rm tracker-ota    (envoie a la carte)
+#
+# Le flashage est dans un "profil" : il ne se lance JAMAIS par accident
+# avec un simple "docker compose up".
+
+services:
+  tracker-build:
+    build: .
+    image: tracker-firmware-build:54
+    volumes:
+      # Le code source est monte, jamais copie dans l'image (Config.h contient
+      # des mots de passe). Chemin relatif a ce dossier : adapte-le si besoin.
+      - ../tracker_web_control54:/work/tracker_web_control54:ro
+      # Binaire + cache de compilation : les recompilations suivantes sont rapides.
+      - tracker-out:/out
+
+  tracker-ota:
+    profiles: ["flash"]
+    image: tracker-firmware-build:54
+    # L'ESP32 se reconnecte au serveur pendant le transfert : le reseau "bridge"
+    # de Docker (NAT) empeche ce retour. Le mode host est necessaire (Linux).
+    network_mode: host
+    env_file: .env
+    volumes:
+      - tracker-out:/out:ro
+    command: flash-ota.sh
+
+volumes:
+  tracker-out:
