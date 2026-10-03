@@ -6,12 +6,13 @@ depuis Internet (HTTPS + mot de passe), compilation et flashage du firmware
 par WiFi.
 
 ```
-                          Internet                          Réseau local (maison)
- ┌───────────┐  HTTPS + mot de passe  ┌──────────────────────┐   HTTP    ┌────────┐
- │ Navigateur│ ─────────────────────► │ Serveur Debian       │ ────────► │ ESP32  │
- └───────────┘                        │  tracker-web (Caddy) │           │tracker │
-                                      │  tracker-build / ota │ ──OTA───► │        │
-                                      └──────────────────────┘           └────────┘
+                Internet                            Serveur Debian (Docker)                Réseau local
+ ┌───────────┐   HTTPS   ┌─────────────────────┐  HTTP  ┌──────────────────────┐  HTTP  ┌────────┐
+ │ Navigateur│ ────────► │ Nginx Proxy Manager │ ─────► │ tracker-web (Caddy)  │ ─────► │ ESP32  │
+ └───────────┘           │ domaine, certificat │        │ mot de passe, pages  │        │tracker │
+                         └─────────────────────┘        ├──────────────────────┤        │        │
+                                                        │ tracker-build / ota  │ ─OTA─► │        │
+                                                        └──────────────────────┘        └────────┘
 ```
 
 | Dossier | Contenu |
@@ -24,9 +25,16 @@ par WiFi.
 
 | Service | Rôle | Quand |
 |---|---|---|
-| `tracker-web` | Sert l'interface en HTTPS, protégée par mot de passe, et relaie les commandes à l'ESP32 | Tourne en permanence |
+| `tracker-web` | Vérifie le mot de passe, sert les pages, relaie les commandes à l'ESP32. Joignable seulement par Nginx Proxy Manager | Tourne en permanence |
 | `tracker-build` | Compile le firmware (`arduino-cli`) | À la demande |
 | `tracker-ota` | Envoie le firmware compilé à l'ESP32 par WiFi | À la demande |
+
+**Qui fait quoi pour l'accès web ?** Nginx Proxy Manager (NPM) garde les
+ports 80/443, le nom de domaine et le certificat HTTPS, comme pour les autres
+services du serveur. `tracker-web` ne publie aucun port sur le réseau : il
+est branché sur le réseau Docker de NPM, qui le joint par son nom. Le mot de
+passe est vérifié par `tracker-web` lui-même, donc il protège le tracker même
+si la configuration de NPM change.
 
 **D'où viennent les pages web ?** Elles restent écrites dans le firmware
 (`PageWeb.h`, `PageCalib.h`, `PageCodeur.h`), comme avant. À la construction
@@ -38,28 +46,20 @@ même endroit, et l'ESP32 continue de les servir lui-même sur le réseau local.
 
 ## 1. Prérequis
 
-- Un serveur **Debian** avec Docker et le plugin Compose :
-  ```bash
-  curl -fsSL https://get.docker.com | sudo sh
-  sudo usermod -aG docker $USER     # puis se déconnecter / reconnecter
-  docker compose version            # doit répondre
-  ```
+- Un serveur **Debian** avec Docker, le plugin Compose et **Nginx Proxy
+  Manager** déjà en place (il occupe les ports 80 et 443).
 - ⚠️ **Le serveur doit être sur le même réseau local que l'ESP32.** Il le
   contacte directement (`http://192.168.1.60`) et le flashage OTA ne
   fonctionne qu'en local. Si ton serveur est ailleurs (VPS, autre maison), il
   faudra d'abord relier les deux réseaux par un VPN (WireGuard, Tailscale…).
 - **Une IP fixe pour l'ESP32** : réserve `192.168.1.60` à sa carte WiFi dans
   la box (bail DHCP statique), sinon l'adresse peut changer après une coupure.
-- Pour l'accès depuis Internet :
-  - un **nom de domaine** (ou sous-domaine, ex. `tracker.mon-domaine.fr`)
-    dont l'enregistrement DNS pointe vers l'IP publique de la box ;
-  - les ports **80 et 443** de la box redirigés vers le serveur (80 sert
-    uniquement à obtenir le certificat HTTPS, tout est ensuite redirigé
-    vers 443).
+- **Un nom de domaine** (ou sous-domaine, ex. `tracker.mon-domaine.fr`) qui
+  pointe vers le serveur, comme pour tes autres services.
 
 > **Ne redirige jamais un port de la box directement vers l'ESP32.** Ses
 > commandes moteur n'ont aucun mot de passe : l'accès Internet doit
-> toujours passer par `tracker-web`.
+> toujours passer par NPM puis `tracker-web`.
 
 ## 2. Installation
 
@@ -80,8 +80,16 @@ cd tracker_docker
 cp .env.example .env
 nano .env
 ```
-À remplir : `SITE_ADDRESS` (ton domaine), `OTA_PASSWORD` (le même que dans
-`Secrets.h`), `HOST_IP` (l'adresse locale de ce serveur, ex. `192.168.1.77`).
+À remplir :
+- `PROXY_NETWORK` : le nom du réseau Docker de NPM. Pour le trouver :
+  ```bash
+  docker ps --format '{{.Names}}' | grep -i proxy        # nom du conteneur NPM
+  docker inspect <conteneur_npm> --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+  ```
+  (souvent `npm_default`, `nginx-proxy-manager_default` ou `proxy`)
+- `OTA_PASSWORD` : le même que dans `Secrets.h`.
+- `HOST_IP` : l'adresse locale de ce serveur (`hostname -I`, première valeur).
+
 Laisse `WEB_USER` et `WEB_PASSWORD_HASH` vides : c'est l'étape suivante.
 
 **c) Identifiant et mot de passe de l'interface web** :
@@ -92,22 +100,41 @@ Le script construit l'image la première fois (une minute), demande un
 identifiant et un mot de passe (12 caractères minimum, la saisie ne
 s'affiche pas), et n'enregistre dans `.env` que son **empreinte**.
 
-**d) Démarrage** :
+**d) Démarrage et test depuis le serveur** :
 ```bash
 docker compose up -d tracker-web
-docker compose logs -f tracker-web          # Ctrl+C pour quitter
+docker compose logs tracker-web             # doit afficher "Interface du tracker : ..."
+curl -u <identifiant> http://127.0.0.1:8088/status
 ```
-Au premier démarrage, Caddy obtient le certificat HTTPS (quelques secondes).
+Le `curl` demande le mot de passe puis doit afficher le JSON de l'ESP32. Le
+port `8088` n'est ouvert que sur le serveur lui-même (`127.0.0.1`), pas sur
+le réseau.
+
+**e) Hôte dans Nginx Proxy Manager** — **Hosts** → **Proxy Hosts** →
+**Add Proxy Host** :
+
+| Onglet | Réglage | Valeur |
+|---|---|---|
+| Details | Domain Names | `tracker.mon-domaine.fr` |
+| Details | Scheme | `http` |
+| Details | Forward Hostname / IP | `tracker-web` |
+| Details | Forward Port | `80` |
+| Details | Block Common Exploits | activé |
+| Details | Cache Assets / Websockets Support | désactivés |
+| Details | Access List | **Publicly Accessible** (voir la note) |
+| SSL | SSL Certificate | Request a new SSL Certificate |
+| SSL | Force SSL, HTTP/2 Support | activés |
+
+> **Pas d'Access List dans NPM.** Le mot de passe est déjà demandé par
+> `tracker-web`. Une Access List NPM utilise le même mécanisme (en-tête
+> `Authorization`) et, par défaut, ne le transmet pas : le navigateur
+> redemanderait le mot de passe en boucle.
+
 Ouvre ensuite `https://tracker.mon-domaine.fr` : le navigateur demande
-l'identifiant et le mot de passe.
+l'identifiant et le mot de passe, puis l'interface s'affiche.
 
 Le service redémarre tout seul après un redémarrage du serveur
 (`restart: unless-stopped`).
-
-> **Tester d'abord en local, sans domaine** : mets `SITE_ADDRESS=:80` dans
-> `.env`, relance `docker compose up -d tracker-web`, puis ouvre
-> `http://<IP_DU_SERVEUR>` depuis la maison. Pas de HTTPS dans ce mode : ne
-> pas l'ouvrir sur Internet ainsi.
 
 ## 3. Utilisation au quotidien
 
@@ -128,7 +155,7 @@ divergent.
 ## 4. La calibration se fait sur place
 
 La calibration de l'azimut fait tourner le tracker : le firmware la **refuse
-volontairement** pour toute requête passée par le serveur (décision de
+volontairement** pour toute requête passée par un proxy (décision de
 sécurité de la v54, conservée). Depuis la maison, ouvre directement :
 
 ```
@@ -141,9 +168,12 @@ répondent « Calibration refusée à distance » — c'est normal.
 ## 5. Sécurité : ce qui est protégé, et comment
 
 - **Tout le site** (pages, données, commandes) exige identifiant + mot de
-  passe. Sans eux, aucune requête n'atteint l'ESP32 (vérifié en test).
-- **HTTPS automatique** (Let's Encrypt, renouvelé tout seul) : le mot de
-  passe ne circule jamais en clair sur Internet.
+  passe, vérifiés par `tracker-web`. Sans eux, aucune requête n'atteint
+  l'ESP32 (vérifié en test, y compris à travers Nginx).
+- **HTTPS** assuré par Nginx Proxy Manager : le mot de passe ne circule
+  jamais en clair sur Internet.
+- **`tracker-web` ne publie aucun port sur le réseau** : seul NPM (réseau
+  Docker partagé) et le serveur lui-même (`127.0.0.1:8088`) peuvent le joindre.
 - **Le mot de passe web n'est stocké nulle part en clair** : seule son
   empreinte bcrypt est dans `.env`.
 - **Démarrage refusé** si la configuration est incomplète ou si l'empreinte
@@ -152,18 +182,19 @@ répondent « Calibration refusée à distance » — c'est normal.
   flashage ne se fait que depuis le réseau local.
 - **Rien de secret dans Git** : `Secrets.h`, `.env` et les binaires `.bin`
   (qui contiennent le mot de passe WiFi en clair) sont exclus par
-  `.gitignore`. L'image web ne peut lire que les 3 pages HTML du firmware
-  (liste blanche dans `.dockerignore`).
+  `.gitignore`, quel que soit leur dossier. L'image web ne peut lire que les
+  3 pages HTML du firmware (liste blanche dans `.dockerignore`).
 
 ## 6. Dépannage
 
 | Symptôme | Cause probable |
 |---|---|
+| `network proxy declared as external, but could not be found` | `PROXY_NETWORK` ne correspond pas au réseau de NPM → étape 2b |
 | Le conteneur s'arrête avec « variable(s) manquante(s) » | `.env` incomplet → relire l'étape 2b / 2c |
 | « n'est pas une empreinte bcrypt valide » | `WEB_PASSWORD_HASH` modifié à la main sans apostrophes → relancer `./definir-mot-de-passe.sh` |
-| Page « Tracker injoignable » | L'ESP32 est éteint, hors WiFi, en cours de flashage, ou a changé d'IP (voir le bail DHCP) |
-| Pas de certificat HTTPS | DNS pas encore propagé, ou ports 80/443 non redirigés vers le serveur. `docker compose logs tracker-web` donne la raison exacte |
-| « port is already allocated » | Un autre service utilise déjà 80/443 sur le serveur → me demander, il faudra passer par le reverse proxy existant |
+| Page **502 Bad Gateway** de NPM | `tracker-web` arrêté, ou pas sur le réseau de NPM → `docker compose ps`, vérifier `PROXY_NETWORK` |
+| Texte « Tracker injoignable » | `tracker-web` marche, mais l'ESP32 ne répond pas : éteint, hors WiFi, en cours de flashage, ou IP changée (voir le bail DHCP) |
+| Le mot de passe est redemandé en boucle | Une Access List est activée dans NPM → la remettre sur « Publicly Accessible » |
 | Modèle 3D absent, page figée | Le **navigateur** n'a pas accès à Internet : Three.js est chargé depuis un CDN (comportement d'origine du firmware) |
 
 ## 7. Bon à savoir
@@ -174,4 +205,4 @@ répondent « Calibration refusée à distance » — c'est normal.
 - Les commandes du firmware sont des requêtes `GET` (`/monter`, `/gauche`…),
   comme dans la version d'origine. Le mot de passe empêche tout accès
   extérieur ; une évolution future pourrait les passer en `POST`.
-- Versions testées : Caddy 2.10.2, core ESP32 3.3.11.
+- Versions testées : Caddy 2.10.2, Nginx 1.24 (en-têtes de NPM), core ESP32 3.3.11.

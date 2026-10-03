@@ -1,6 +1,6 @@
 # Tracker solaire : interface web + compilation + flashage OTA du firmware.
 #
-#   Interface web (tourne en permanence) :
+#   Interface web (tourne en permanence, derriere le Nginx du serveur) :
 #     ./definir-mot-de-passe.sh                            (1 fois)
 #     docker compose up -d tracker-web
 #
@@ -14,8 +14,13 @@
 
 services:
   # ------------------------------------------------------------------
-  # Interface web : HTTPS + mot de passe, pages servies par le serveur,
-  # commandes relayees a l'ESP32 sur le reseau local.
+  # Interface web : mot de passe, pages servies par le serveur, commandes
+  # relayees a l'ESP32 sur le reseau local.
+  #
+  # Place DERRIERE le Nginx du serveur, qui garde les ports 80/443, le nom
+  # de domaine et le certificat HTTPS :
+  #   Internet --HTTPS--> Nginx --HTTP--> tracker-web --HTTP--> ESP32
+  # Le mot de passe reste verifie ICI, quelle que soit la config de Nginx.
   # ------------------------------------------------------------------
   tracker-web:
     build:
@@ -27,19 +32,20 @@ services:
     restart: unless-stopped
     # Seules les variables utiles sont transmises (pas le mot de passe OTA).
     environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:-}
+      # HTTP simple sur le port 80 du conteneur : le HTTPS est fait par Nginx.
+      SITE_ADDRESS: ":80"
       ESP32_URL: ${ESP32_URL:-http://192.168.1.60}
       WEB_USER: ${WEB_USER:-}
       WEB_PASSWORD_HASH: ${WEB_PASSWORD_HASH:-}
+    # Aucun port publie sur le reseau : seuls Nginx (via le reseau Docker
+    # partage) et le serveur lui-meme (127.0.0.1, pour tester) y accedent.
     ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-      - "${HTTPS_PORT:-443}:443/udp"
-    volumes:
-      # Certificats HTTPS : a conserver, sinon Let's Encrypt est
-      # resollicite a chaque redemarrage (et limite les demandes).
-      - caddy-data:/data
-      - caddy-config:/config
+      - "127.0.0.1:${WEB_PORT:-8088}:80"
+    networks:
+      default:
+      proxy:
+        # Nom sous lequel Nginx joint ce service : http://tracker-web:80
+        aliases: [tracker-web]
 
   # ------------------------------------------------------------------
   # Compilation du firmware (image de ton pere, inchangee)
@@ -70,5 +76,10 @@ services:
 
 volumes:
   tracker-out:
-  caddy-data:
-  caddy-config:
+
+networks:
+  # Reseau Docker de ton Nginx (le trouver avec : docker network ls).
+  # tracker-web s'y branche pour que Nginx puisse le joindre par son nom.
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}
