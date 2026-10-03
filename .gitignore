@@ -1,7 +1,8 @@
 # --- Secrets : ne JAMAIS publier ---
-tracker_web_control54/Secrets.h
+# Sans chemin : ignores dans N'IMPORTE QUEL dossier (ex. si un dossier
+# tracker_web_control55 est cree un jour, son Secrets.h reste protege).
+Secrets.h
 .env
-tracker_docker/.env
 
 # --- Binaires compiles ---
 # Ils contiennent le mot de passe WiFi EN CLAIR (verifie sur le .bin v54).
