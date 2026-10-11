@@ -115,6 +115,10 @@ border-radius:4px;margin-left:6px;vertical-align:middle;}
 .histLoc th{position:sticky;top:0;background:#1f2738;font-size:10px;color:#9aa5b1;text-align:left;padding:4px;font-weight:600;}
 .histLoc th.hv{text-align:right;}
 .histDl{display:inline-block;margin-top:8px;font-size:11px;color:#64b5f6;text-decoration:none;}
+.gBarres div.enCours{opacity:0.4;}
+.gLegende{font-size:10px;color:#7a8894;margin:6px 0 0;}
+.relResume{font-size:11px;color:#c7cedb;margin:0 0 6px;line-height:1.5;}
+.relResume b{color:#e4e8ee;}
 .anemoAlerte{display:none;margin:12px 0 0;padding:10px 12px;border-radius:8px;font-size:12px;
 background:rgba(244,67,54,0.14);border:1px solid #F44336;color:#FF8A80;}
 .anemoAlerte.vif{animation:anemoBlink 1.1s ease-in-out infinite;}
@@ -238,6 +242,45 @@ oninput="offsetDebug=parseInt(this.value); document.getElementById('offsetVal').
 </div>
 <a class='histDl' href='/api/historique-meteo.csv' download='releves_meteo.csv'>⬇ Télécharger le tableau (CSV)</a>
 </div>
+</div>
+<div class='histLoc' id='histVent30'>
+<h3>Évolution du vent local (moyenne et rafale max par 30 min, 12 h glissantes)</h3>
+<p class='vide' id='hv30Vide'>Premier relevé dans 30 min...</p>
+<div id='hv30Contenu' style='display:none;'>
+<div class='graphMeteo'>
+<div class='gTete'><span><b>Vent moyen</b> <span id='gValVM'></span><span id='gFlV'></span></span><span class='gPlage' id='gPlageVM'></span></div>
+<div class='gBarres' id='gBarresVM'></div>
+<div class='gAxe' id='gAxeVM'></div>
+</div>
+<div class='graphMeteo'>
+<div class='gTete'><span><b>Rafale max</b> <span id='gValVR'></span></span><span class='gPlage' id='gPlageVR'></span></div>
+<div class='gBarres' id='gBarresVR'></div>
+<div class='gAxe' id='gAxeVR'></div>
+</div>
+<p class='gLegende'>Barres : vert &lt; 20 km/h, orange 20-40, rouge &gt; 40. La dernière barre, plus pâle, est la demi-heure en cours.</p>
+<div class='histTabWrap'>
+<table>
+<thead><tr><th>Heure (UTC)</th><th class='hv'>Vent moyen</th><th class='hv'>Rafale max</th></tr></thead>
+<tbody id='hv30Corps'></tbody>
+</table>
+</div>
+<a class='histDl' href='/api/releves-vent.csv' download='releves_vent.csv'>⬇ Télécharger le tableau (CSV)</a>
+</div>
+</div>
+<div class='histLoc' id='relAnemo'>
+<h3>Relevés de l'anémomètre (vérification de la constante vent)</h3>
+<p class='relResume' id='relResume'>--</p>
+<p class='vide' id='relVide'>Aucun relevé pour l'instant : une ligne s'ajoute pour chaque tranche de 10 min où l'anémomètre tourne.</p>
+<div id='relContenu' style='display:none;'>
+<div class='histTabWrap'>
+<table>
+<thead><tr><th>Heure (UTC)</th><th class='hv'>Tension</th><th class='hv'>Vent local</th><th class='hv'>Vent régional</th><th class='hv'>Constante</th></tr></thead>
+<tbody id='relCorps'></tbody>
+</table>
+</div>
+<a class='histDl' href='/api/releves-anemo.csv' download='releves_anemometre.csv'>⬇ Télécharger le tableau (CSV, avec les rafales)</a>
+</div>
+<p class='gLegende'>Vent local = tension × constante. Constante suggérée = vent régional ÷ tension, calculée seulement quand le vent régional dépasse 5 km/h. Le vent régional est un modèle à 10 m de hauteur sur une maille de plusieurs km : l'écart avec un site abrité est normal, il faut de nombreux relevés par jour de vent.</p>
 </div>
 <p id='pluieTxt'>Risque de pluie : -- %</p>
 <p class='petit'>Mise à jour il y a <span id='meteoAge'>--</span>s. Vent/pression : source en ligne, pas encore de capteur local.</p>
@@ -739,6 +782,99 @@ tb.appendChild(tr);
 }).catch(function(){});
 }
 
+// Historique du vent local : vent moyen et rafale max par demi-heure.
+// Contrairement a la temperature et a la pression, les barres partent
+// de ZERO (un vent nul a un sens) et les deux series partagent la meme
+// echelle, pour comparer moyenne et rafale d'un coup d'oeil. Couleur
+// = niveau de vent, comme les voyants : vert <20, orange 20-40, rouge >40.
+function couleurVent(v){ return (v>40)?'#F44336':(v>=20)?'#FF9800':'#4CAF50'; }
+function tracerVent(idBarres,idAxe,idPlage,vals,heures,enCours,echelle){
+var bar=document.getElementById(idBarres); if(!bar) return;
+bar.innerHTML='';
+var tout=vals.concat([enCours]);
+for(var i=0;i<tout.length;i++){
+var b=document.createElement('div');
+var dernier=(i==tout.length-1);
+b.style.height=Math.max(3,(tout[i]/echelle)*100)+'%';
+b.style.background=couleurVent(tout[i]);
+if(dernier) b.className='enCours';
+b.title=(dernier?'Demi-heure en cours':heures[i]+' UTC')+' : '+tout[i].toFixed(1)+' km/h';
+bar.appendChild(b);
+}
+var mn=Math.min.apply(null,vals), mx=Math.max.apply(null,vals);
+document.getElementById(idPlage).textContent='min '+mn.toFixed(1)+' · max '+mx.toFixed(1)+' km/h';
+document.getElementById(idAxe).innerHTML='<span>'+heures[0]+'</span><span>maintenant</span>';
+}
+
+function rafraichirReleveVent(){
+fetch('/api/releves-vent').then(r=>r.json()).then(d=>{
+var ct=document.getElementById('hv30Contenu'), vd=document.getElementById('hv30Vide');
+if(!ct||!vd) return;
+var pts=d.points||[], ec=d.enCours||{min:0,m:0,r:0};
+if(pts.length===0){
+ct.style.display='none'; vd.style.display='block';
+vd.textContent='Premier relevé dans '+Math.max(0,30-ec.min)+' min (demi-heure en cours : moyenne '
++ec.m.toFixed(1)+' km/h, rafale max '+ec.r.toFixed(1)+' km/h).';
+return;
+}
+vd.style.display='none'; ct.style.display='block';
+
+var heures=pts.map(function(e){return e.h;});
+var moy=pts.map(function(e){return e.m;});
+var raf=pts.map(function(e){return e.r;});
+var echelle=Math.max(30,ec.r,Math.max.apply(null,raf))*1.1;
+tracerVent('gBarresVM','gAxeVM','gPlageVM',moy,heures,ec.m,echelle);
+tracerVent('gBarresVR','gAxeVR','gPlageVR',raf,heures,ec.r,echelle);
+var n=pts.length-1;
+document.getElementById('gValVM').textContent=moy[n].toFixed(1)+' km/h';
+document.getElementById('gValVR').textContent=raf[n].toFixed(1)+' km/h';
+document.getElementById('gFlV').innerHTML=fleche(d.tendance,'vent');
+
+// Tableau complet, du plus recent au plus ancien (defilant).
+var tb=document.getElementById('hv30Corps'); tb.innerHTML='';
+for(var i=n;i>=0;i--){
+var tr=document.createElement('tr');
+var td1=document.createElement('td'); td1.className='hh'; td1.textContent=heures[i];
+var td2=document.createElement('td'); td2.className='hv'; td2.textContent=moy[i].toFixed(1)+' km/h';
+var td3=document.createElement('td'); td3.className='hv'; td3.textContent=raf[i].toFixed(1)+' km/h';
+td3.style.color=couleurVent(raf[i]);
+tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+tb.appendChild(tr);
+}
+}).catch(function(){});
+}
+
+// Releves de verification de la constante vent : une ligne par tranche
+// de 10 min ou l'anemometre a tourne, la plus recente en haut.
+function rafraichirRelevesAnemo(){
+fetch('/api/releves-anemo').then(r=>r.json()).then(d=>{
+var res=document.getElementById('relResume'); if(!res) return;
+var ec=d.enCours||{min:0,actifPct:0};
+var txt='Constante actuelle : <b>'+d.constante+'</b> km/h par volt';
+if(d.suggeree!==null) txt+=' · suggérée : <b>'+d.suggeree.toFixed(1)+'</b> (médiane de '+d.nValides+' relevé'+(d.nValides>1?'s':'')+')';
+else txt+=' · suggérée : pas encore assez de vent';
+txt+='<br>Tranche en cours : '+ec.min+' min, anémomètre en rotation '+ec.actifPct+' % du temps';
+res.innerHTML=txt;
+var l=d.lignes||[];
+var ct=document.getElementById('relContenu'), vd=document.getElementById('relVide');
+if(l.length===0){ ct.style.display='none'; vd.style.display='block'; return; }
+vd.style.display='none'; ct.style.display='block';
+var tb=document.getElementById('relCorps'); tb.innerHTML='';
+for(var i=l.length-1;i>=0;i--){
+var e=l[i], tr=document.createElement('tr');
+var cel=[e.h, e.v.toFixed(3)+' V', e.l.toFixed(1)+' km/h',
+(e.r===null)?'--':e.r.toFixed(1)+' km/h', (e.k===null)?'--':e.k.toFixed(1)];
+for(var j=0;j<cel.length;j++){
+var td=document.createElement('td'); td.className=(j==0)?'hh':'hv'; td.textContent=cel[j];
+if(j==4&&e.k!==null) td.style.color='#64b5f6';
+tr.appendChild(td);
+}
+tr.title='Rafale locale '+e.lr.toFixed(1)+' km/h ('+e.vx.toFixed(3)+' V)'+((e.rr===null)?'':' · rafale régionale '+e.rr.toFixed(1)+' km/h');
+tb.appendChild(tr);
+}
+}).catch(function(){});
+}
+
 // Episode de vent fort : 15 derniers releves (un toutes les 5 s),
 // barres colorees comme les voyants (vert <20, orange 20-40, rouge >40)
 // et tendance. Masque tant qu'aucun episode n'a eu lieu.
@@ -795,5 +931,7 @@ refresh();setInterval(refresh,1000);
 rafraichirHistorique();setInterval(rafraichirHistorique,15000);
 rafraichirEpisode();setInterval(rafraichirEpisode,5000);
 rafraichirHistoLocal();setInterval(rafraichirHistoLocal,60000);
+rafraichirReleveVent();setInterval(rafraichirReleveVent,60000);
+rafraichirRelevesAnemo();setInterval(rafraichirRelevesAnemo,60000);
 </script>
 </body></html>)rawliteral";

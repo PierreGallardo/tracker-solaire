@@ -250,6 +250,25 @@
 #define SEUIL_TENDANCE_TEMP_C     0.4       // ecart mini, en degres
 #define SEUIL_TENDANCE_PRESS_HPA  0.4       // ecart mini, en hPa
 
+// Historique du vent local, sur le meme modele : un point par
+// demi-heure = vent MOYEN et RAFALE MAX de la demi-heure ecoulee
+// (une valeur instantanee ne voudrait rien dire pour le vent).
+#define NB_ECHANT_HISTO_VENT          24          // 24 x 30 min = 12 h
+#define PERIODE_HISTO_VENT_MS         1800000UL   // 30 min
+#define PERIODE_ECHANT_HISTO_VENT_MS  5000UL      // vent moyen echantillonne toutes les 5 s
+#define SEUIL_TENDANCE_HISTO_VENT_KMH 2.0         // ecart mini sur le vent moyen
+
+// Releves de verification de la constante FACTEUR_VOLT_KMH : une
+// ligne par tranche de 10 min pendant laquelle l'anemometre a tourne,
+// avec la tension mesuree, le vent calcule et le vent regional en face.
+#define NB_RELEVES_ANEMO              30          // 30 lignes conservees (NVS)
+#define PERIODE_RELEVE_ANEMO_MS       600000UL    // une ligne par tranche de 10 min
+#define PERIODE_ECHANT_RELEVE_MS      1000UL      // tension lue toutes les secondes
+#define RELEVE_ANEMO_ACTIF_MIN_PCT    50          // tourne au moins 50 % de la tranche
+#define RELEVE_TENSION_MIN_V          0.05        // en dessous, constante non calculee
+#define RELEVE_VENT_REG_MIN_KMH       5.0         // idem pour le vent regional
+#define RELEVE_METEO_AGE_MAX_MS       1800000UL   // meteo de plus de 30 min : ignoree
+
 // ============================================================
 // SUIVI SOLAIRE AUTOMATIQUE
 // ------------------------------------------------------------

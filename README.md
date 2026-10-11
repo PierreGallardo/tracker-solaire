@@ -167,6 +167,17 @@ répondent « Calibration refusée à distance » — c'est normal.
 
 ## 5. Sécurité : ce qui est protégé, et comment
 
+- **Depuis Internet, on peut arrêter le tracker mais pas le déplacer**
+  (il n'y a pas de caméra sur place). `tracker-web` répond `403` à
+  `/monter`, `/descendre`, `/gauche`, `/droite`, `/suivi_auto` et aux
+  commandes de calibration, sans les transmettre à l'ESP32. Restent
+  autorisés : les arrêts, le retour à plat, le mode manuel et les
+  acquittements. Pour déplacer le tracker, utiliser l'adresse locale
+  `http://192.168.1.60` depuis la maison.
+- **Une commande lancée depuis un autre site est refusée** (`403`) : le
+  navigateur renvoie le mot de passe tout seul, un lien piégé ailleurs ne
+  doit pas pouvoir arrêter ou remettre à plat le tracker.
+
 - **Tout le site** (pages, données, commandes) exige identifiant + mot de
   passe, vérifiés par `tracker-web`. Sans eux, aucune requête n'atteint
   l'ESP32 (vérifié en test, y compris à travers Nginx).
@@ -195,6 +206,7 @@ répondent « Calibration refusée à distance » — c'est normal.
 | Page **502 Bad Gateway** de NPM | `tracker-web` arrêté, ou pas sur le réseau de NPM → `docker compose ps`, vérifier `PROXY_NETWORK` |
 | Texte « Tracker injoignable » | `tracker-web` marche, mais l'ESP32 ne répond pas : éteint, hors WiFi, en cours de flashage, ou IP changée (voir le bail DHCP) |
 | Le mot de passe est redemandé en boucle | Une Access List est activée dans NPM → la remettre sur « Publicly Accessible » |
+| « Commande refusée à distance » | Normal : les mouvements sont interdits depuis Internet (voir §5). Passer par `http://192.168.1.60` à la maison |
 | Modèle 3D absent, page figée | Le **navigateur** n'a pas accès à Internet : Three.js est chargé depuis un CDN (comportement d'origine du firmware) |
 
 ## 7. Bon à savoir
@@ -203,6 +215,7 @@ répondent « Calibration refusée à distance » — c'est normal.
   l'interroge chaque seconde : évite de laisser beaucoup d'onglets ouverts
   en même temps.
 - Les commandes du firmware sont des requêtes `GET` (`/monter`, `/gauche`…),
-  comme dans la version d'origine. Le mot de passe empêche tout accès
-  extérieur ; une évolution future pourrait les passer en `POST`.
+  comme dans la version d'origine. Le mot de passe et le refus des
+  commandes venant d'un autre site les protègent ; une évolution future
+  pourrait les passer en `POST`.
 - Versions testées : Caddy 2.10.2, Nginx 1.24 (en-têtes de NPM), core ESP32 3.3.11.

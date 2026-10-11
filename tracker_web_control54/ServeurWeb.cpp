@@ -9,6 +9,8 @@
 #include "Meteo.h"
 #include "CapteursI2C.h"
 #include "HistoMeteo.h"
+#include "HistoVent.h"
+#include "ReleveAnemo.h"
 #include "Codeur.h"
 #include "PageCodeur.h"
 #include "Home.h"
@@ -187,6 +189,24 @@ static void handleHistoriqueMeteoCsv() {
   server.send(200, "text/csv; charset=UTF-8", historiqueMeteoCsv());
 }
 
+static void handleRelevesAnemo() {
+  server.send(200, "application/json", releveAnemoJson());
+}
+
+static void handleRelevesAnemoCsv() {
+  server.sendHeader("Content-Disposition", "attachment; filename=\"releves_anemometre.csv\"");
+  server.send(200, "text/csv; charset=UTF-8", releveAnemoCsv());
+}
+
+static void handleRelevesVent() {
+  server.send(200, "application/json", historiqueVent30Json());
+}
+
+static void handleRelevesVentCsv() {
+  server.sendHeader("Content-Disposition", "attachment; filename=\"releves_vent.csv\"");
+  server.send(200, "text/csv; charset=UTF-8", historiqueVent30Csv());
+}
+
 static void handleHistoriqueMeteo() {
   server.send(200, "application/json", historiqueMeteoJson());
 }
@@ -275,6 +295,10 @@ void setupServeurWeb() {
   server.on("/api/episode-vent", handleEpisodeVent);
   server.on("/api/historique-meteo", handleHistoriqueMeteo);
   server.on("/api/historique-meteo.csv", handleHistoriqueMeteoCsv);
+  server.on("/api/releves-vent", handleRelevesVent);
+  server.on("/api/releves-vent.csv", handleRelevesVentCsv);
+  server.on("/api/releves-anemo", handleRelevesAnemo);
+  server.on("/api/releves-anemo.csv", handleRelevesAnemoCsv);
   server.on("/codeur", handlePageCodeur);
   server.on("/api/codeur", handleCodeurJson);
   server.on("/api/codeur-actif", handleCodeurActif);

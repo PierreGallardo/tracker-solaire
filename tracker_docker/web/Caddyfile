@@ -18,7 +18,6 @@
 #   WEB_USER           identifiant de l'interface web
 #   WEB_PASSWORD_HASH  empreinte bcrypt (./definir-mot-de-passe.sh)
 # ============================================================
-
 {
 	# API d'administration de Caddy desactivee : rien a piloter a distance.
 	admin off
@@ -57,6 +56,30 @@
 		header Cache-Control no-cache
 		rewrite * /codeur.html
 		file_server
+	}
+
+	# --- Mouvements et calibration interdits a distance ------------
+	# Pas de camera sur place : depuis Internet on peut ARRETER le
+	# tracker (stop, retour a plat, mode manuel, acquitter), mais pas
+	# le faire bouger. Ces commandes restent utilisables en direct sur
+	# le reseau local (http://192.168.1.60).
+	# Prefixe, sans tenir compte des majuscules : couvre aussi "/monter/",
+	# "/MONTER" ou "/api/calib-jog?..." encode.
+	@mouvement path_regexp (?i)^/(monter|descendre|gauche|droite|suivi_auto|api/calib-)
+	handle @mouvement {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "Commande refusee a distance : le tracker ne peut pas etre deplace depuis Internet. Utiliser l'adresse locale de l'ESP32." 403
+	}
+
+	# --- Commandes autorisees : refusees si lancees par un autre site --
+	# Le navigateur renvoie le mot de passe tout seul : sans cette regle,
+	# un lien pieges sur un autre site pourrait declencher une commande.
+	@commande_croisee {
+		path_regexp (?i)^/(stop_vertical|stop_horizontal|retour_a_plat|mode_manuel|acquitter_|api/codeur-zero|api/codeur-actif)
+		header Sec-Fetch-Site cross-site
+	}
+	handle @commande_croisee {
+		respond "Commande refusee : elle ne vient pas de l'interface du tracker." 403
 	}
 
 	# --- Tout le reste : relaye a l'ESP32 --------------------------

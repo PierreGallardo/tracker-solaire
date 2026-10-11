@@ -42,6 +42,8 @@
 #include "Meteo.h"
 #include "Solaire.h"
 #include "HistoMeteo.h"
+#include "HistoVent.h"
+#include "ReleveAnemo.h"
 #include "Codeur.h"
 #include "Home.h"
 #include "CalibAzimut.h"
@@ -80,6 +82,8 @@ void setup() {
   // NVS : recharge l'historique vent survivant au dernier redemarrage.
   initHistoriqueVentNVS();
   setupHistoMeteo();          // premier releve temperature/pression
+  setupHistoVent();          // vent moyen + rafale max par demi-heure (NVS)
+  setupReleveAnemo();        // releves de verification de la constante vent (NVS)
 
   // Sans WiFi, pas de serveur web ni de meteo : on s'arrete ici.
   if (!connectWiFi()) return;
@@ -107,6 +111,8 @@ void loop() {
   updateControle();          // arrets auto + asservissement retour a plat
   updateMeteo();             // rafraichissement meteo toutes les 10 min
   updateHistoMeteo();        // releve local toutes les 30 min
+  updateHistoVent();         // vent moyen + rafale max par demi-heure
+  updateReleveAnemo();       // releves de verification de la constante vent
 
   updateVent();              // moyenne 5 s : vitesse, tendance, paliers
   updateRafale();            // pic 2 s : rafale breve non lissee

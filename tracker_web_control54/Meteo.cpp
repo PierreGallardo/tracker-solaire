@@ -13,7 +13,7 @@ void fetchMeteo() {
   HTTPClient http;
   String url = "http://api.open-meteo.com/v1/forecast?latitude=" + String(LATITUDE_DEG, 4) +
                "&longitude=" + String(LONGITUDE_DEG, 4) +
-               "&current=temperature_2m,wind_speed_10m,surface_pressure" +
+               "&current=temperature_2m,wind_speed_10m,wind_gusts_10m,surface_pressure" +
                "&hourly=precipitation_probability&forecast_hours=3&timezone=auto";
 
   http.begin(url);
@@ -26,6 +26,7 @@ void fetchMeteo() {
     if (!err) {
       meteo.temperatureC  = doc["current"]["temperature_2m"] | 0.0;
       meteo.ventKmh       = doc["current"]["wind_speed_10m"] | 0.0;
+      meteo.rafaleKmh     = doc["current"]["wind_gusts_10m"] | 0.0;
       meteo.pressionHpa   = doc["current"]["surface_pressure"] | 0.0;
       meteo.probaPluiePct = doc["hourly"]["precipitation_probability"][1] | 0;
       meteo.valide = true;
