@@ -73,11 +73,25 @@
 		respond "Commande refusee a distance : le tracker ne peut pas etre deplace depuis Internet. Utiliser l'adresse locale de l'ESP32." 403
 	}
 
+	# --- Diagnostics des broches interdits a distance ---------------
+	# /api/diag-analog et /api/diag-broches CHANGENT le reglage des
+	# broches (attenuation ADC, resistance de tirage) : sur la broche de
+	# l'anemometre (32), cela fausse la mesure du vent jusqu'au
+	# redemarrage. Outils de mise au point a utiliser sur place.
+	@diagnostic path_regexp (?i)^/api/diag-
+	handle @diagnostic {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "Diagnostic refuse a distance : il modifie le reglage des broches de l'ESP32. Utiliser l'adresse locale de l'ESP32." 403
+	}
+
 	# --- Commandes autorisees : refusees si lancees par un autre site --
 	# Le navigateur renvoie le mot de passe tout seul : sans cette regle,
 	# un lien pieges sur un autre site pourrait declencher une commande.
+	# api/home (?zero=1) et api/codeur-trace (?go=1) modifient l'etat de
+	# la carte : la regle porte sur le chemin, la lecture simple venant
+	# des pages du tracker reste permise (meme site).
 	@commande_croisee {
-		path_regexp (?i)^/(stop_vertical|stop_horizontal|retour_a_plat|mode_manuel|acquitter_|api/codeur-zero|api/codeur-actif)
+		path_regexp (?i)^/(stop_vertical|stop_horizontal|retour_a_plat|mode_manuel|acquitter_|api/codeur-zero|api/codeur-actif|api/codeur-trace|api/home)
 		header Sec-Fetch-Site cross-site
 	}
 	handle @commande_croisee {

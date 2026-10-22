@@ -174,6 +174,9 @@ répondent « Calibration refusée à distance » — c'est normal.
   autorisés : les arrêts, le retour à plat, le mode manuel et les
   acquittements. Pour déplacer le tracker, utiliser l'adresse locale
   `http://192.168.1.60` depuis la maison.
+- **Les diagnostics des broches** (`/api/diag-analog`, `/api/diag-broches`)
+  sont aussi refusés à distance : ils changent le réglage des broches et
+  fausseraient l'anémomètre jusqu'au redémarrage.
 - **Une commande lancée depuis un autre site est refusée** (`403`) : le
   navigateur renvoie le mot de passe tout seul, un lien piégé ailleurs ne
   doit pas pouvoir arrêter ou remettre à plat le tracker.
