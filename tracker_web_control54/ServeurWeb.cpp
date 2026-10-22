@@ -11,6 +11,7 @@
 #include "HistoMeteo.h"
 #include "HistoVent.h"
 #include "ReleveAnemo.h"
+#include "EnregRafales.h"
 #include "Codeur.h"
 #include "PageCodeur.h"
 #include "Home.h"
@@ -88,6 +89,12 @@ static void handleStatus() {
   doc["securiteVent"]  = ventSecuriteActive();
   doc["modeVentReduit"] = ventModeReduit();
   doc["secAvantLevee"]  = ventSecondesAvantLevee();
+  // AJOUT 1 : mise a plat sur rafales repetees
+  doc["rafalesFenetre"]        = ventNbRafalesFenetre();
+  doc["miseAPlatRafales"]      = ventMiseAPlatRafales();
+  doc["secAvantRedeploiement"] = ventSecondesAvantRedeploiement();
+  // AJOUT 2 : etat du bargraphe (le detail est sur /api/rafales)
+  doc["enregRafales"]          = enregRafalesActif();
   doc["alerteVent"]     = ventAlerteEnAttente();
   if (ventAlerteEnAttente()) {
     doc["alerteVitesse"] = ventAlerteVitesse();
@@ -188,6 +195,34 @@ static void handleHistoriqueMeteoCsv() {
   server.sendHeader("Content-Disposition", "attachment; filename=\"releves_meteo.csv\"");
   server.send(200, "text/csv; charset=UTF-8", historiqueMeteoCsv());
 }
+
+// ============================================================
+// AJOUT 2 - BARGRAPHE DES RAFALES
+// ------------------------------------------------------------
+// Jusqu a 5760 barres : la reponse (environ 25 Ko au pire) est
+// envoyee par morceaux, sans jamais la construire en entier en RAM.
+// /api/rafales?depuis=<heure UTC> ne renvoie que les barres plus
+// recentes : le navigateur ne recharge pas tout toutes les 15 s.
+// ============================================================
+
+static void ecrireMorceauHttp(const char* texte) { server.sendContent(texte); }
+
+static void handleRafales() {
+  uint32_t depuis = (uint32_t)strtoul(server.arg("depuis").c_str(), nullptr, 10);
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  enregRafalesJson(depuis, ecrireMorceauHttp);
+  server.sendContent("");   // fin de la reponse par morceaux
+}
+
+#if SIMULATION_VENT
+// TESTS : /api/sim-vent?kmh=35  ou  /api/sim-vent?scenario=rafales
+static void handleSimVent() {
+  if (server.hasArg("scenario")) simulationVentScenario();
+  else simulationVentFixer(server.arg("kmh").toFloat());
+  server.send(200, "text/plain; charset=UTF-8", "Simulation du vent prise en compte.");
+}
+#endif
 
 static void handleRelevesAnemo() {
   server.send(200, "application/json", releveAnemoJson());
@@ -297,6 +332,10 @@ void setupServeurWeb() {
   server.on("/api/historique-meteo.csv", handleHistoriqueMeteoCsv);
   server.on("/api/releves-vent", handleRelevesVent);
   server.on("/api/releves-vent.csv", handleRelevesVentCsv);
+  server.on("/api/rafales", handleRafales);              // AJOUT 2
+#if SIMULATION_VENT
+  server.on("/api/sim-vent", handleSimVent);             // TESTS uniquement
+#endif
   server.on("/api/releves-anemo", handleRelevesAnemo);
   server.on("/api/releves-anemo.csv", handleRelevesAnemoCsv);
   server.on("/codeur", handlePageCodeur);

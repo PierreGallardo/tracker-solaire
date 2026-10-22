@@ -1,0 +1,12 @@
+# Fins de ligne normalisees dans le depot.
+* text=auto
+
+# Scripts et fichiers Docker executes sous Linux : toujours LF,
+# sinon "bad interpreter" sur le serveur.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+
+# Binaires
+*.png binary
+*.pdf binary

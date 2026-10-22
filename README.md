@@ -70,8 +70,8 @@ cd tracker-solaire
 
 **a) Identifiants du firmware** (WiFi + OTA) — fichier jamais publié :
 ```bash
-cp tracker_web_control54/Secrets.h.example tracker_web_control54/Secrets.h
-nano tracker_web_control54/Secrets.h        # remplir les 3 valeurs
+cp tracker_web_control54/Secrets.exemple.h tracker_web_control54/Secrets.h
+nano tracker_web_control54/Secrets.h        # WiFi, mot de passe OTA, position
 ```
 
 **b) Configuration du serveur** :

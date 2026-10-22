@@ -23,7 +23,7 @@
 // Materiel : ESP32 Dev Module, 2x BTS7960/IBT_2, potentiometre 3B3,
 //            BMP280 HW-611, RTC DS3231, anemometre HWFS-1.
 // Reseau   : 192.168.1.60 ou http://tracker.local
-// Site     : 47.1108 N / 6.3032 E / ~729 m
+// Site     : position dans Secrets.h (non versionne)
 //
 // Bibliotheques requises (Gestionnaire de bibliotheques) :
 //   Adafruit BMP280 Library, Adafruit Unified Sensor, RTClib, ArduinoJson
@@ -44,6 +44,7 @@
 #include "HistoMeteo.h"
 #include "HistoVent.h"
 #include "ReleveAnemo.h"
+#include "EnregRafales.h"
 #include "Codeur.h"
 #include "Home.h"
 #include "CalibAzimut.h"
@@ -84,6 +85,7 @@ void setup() {
   setupHistoMeteo();          // premier releve temperature/pression
   setupHistoVent();          // vent moyen + rafale max par demi-heure (NVS)
   setupReleveAnemo();        // releves de verification de la constante vent (NVS)
+  setupEnregRafales();       // AJOUT 2 : bargraphe des rafales (LittleFS)
 
   // Sans WiFi, pas de serveur web ni de meteo : on s'arrete ici.
   if (!connectWiFi()) return;
@@ -113,6 +115,7 @@ void loop() {
   updateHistoMeteo();        // releve local toutes les 30 min
   updateHistoVent();         // vent moyen + rafale max par demi-heure
   updateReleveAnemo();       // releves de verification de la constante vent
+  updateEnregRafales();      // AJOUT 2 : barres de 15 s + sauvegarde par morceaux
 
   updateVent();              // moyenne 5 s : vitesse, tendance, paliers
   updateRafale();            // pic 2 s : rafale breve non lissee

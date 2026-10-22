@@ -24,6 +24,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "Config.h"   // AJOUT : SIMULATION_VENT conditionne des declarations
 
 // Ouvre le stockage NVS et recharge l'historique sauvegarde.
 // A appeler dans setup(), apres setupCapteursI2C().
@@ -109,3 +110,26 @@ uint8_t ventVitesseMoteur();
 // [{"h":"14:32:05","v":52.3,"c":"moyenne"}, ...]
 // du plus ancien au plus recent. Renvoie "[]" si aucun evenement.
 String historiqueVentJson();
+
+// ============================================================
+// AJOUT 1 - MISE A PLAT SUR RAFALES REPETEES
+// ------------------------------------------------------------
+// RAFALE_NB passages au-dessus de RAFALE_SEUIL_KMH (hysteresis a
+// RAFALE_RESET_KMH) en RAFALE_FENETRE_MS -> retour a plat, leve apres
+// REDEPLOIE_DELAI_MS sans echantillon au-dessus de REDEPLOIE_CALME_KMH.
+// Etat independant des paliers existants, qui restent prioritaires.
+// ============================================================
+
+// true si un retour a plat est demande : paliers existants OU rafales
+// repetees. A utiliser par le controle moteur.
+bool ventMiseAPlatRequise();
+
+bool          ventMiseAPlatRafales();          // la regle rafales est active
+int           ventNbRafalesFenetre();          // rafales dans les 3 dernieres min
+unsigned long ventSecondesAvantRedeploiement(); // 0 si inactif ou decompte non demarre
+
+#if SIMULATION_VENT
+// TESTS : vitesse fixe, ou scenario de 4 rafales en moins de 2 min.
+void simulationVentFixer(float kmh);
+void simulationVentScenario();
+#endif
