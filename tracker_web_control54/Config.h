@@ -10,18 +10,25 @@
 
 #include <Arduino.h>
 
-// Identifiants (WiFi, OTA) : fichier separe, jamais publie sur GitHub.
+// ============================================================
+// DONNEES PERSONNELLES : Secrets.h (ignore par Git)
+// ------------------------------------------------------------
+// Mots de passe WiFi et OTA, nom du reseau et position du tracker.
+// Sur un nouveau poste : copier Secrets.exemple.h en Secrets.h et
+// le remplir.
+// ============================================================
 #if __has_include("Secrets.h")
-  #include "Secrets.h"
+#include "Secrets.h"
 #else
-  #error "Secrets.h manquant : copie Secrets.h.example en Secrets.h et remplis-le."
+#error "Secrets.h manquant : copier Secrets.exemple.h en Secrets.h et le remplir."
 #endif
 
 // ============================================================
 // WIFI
 // ============================================================
 
-// WIFI_SSID et WIFI_PASSWORD : definis dans Secrets.h
+// WIFI_SSID et WIFI_PASSWORD : voir Secrets.h
+
 #define MDNS_HOSTNAME   "tracker"      // -> http://tracker.local
 
 // ------------------------------------------------------------
@@ -33,15 +40,13 @@
 // expose sur internet (le mot de passe transite faiblement
 // protege) : passer par un VPN dans ce cas.
 #define OTA_HOSTNAME    "tracker-solaire"
-// OTA_PASSWORD : defini dans Secrets.h
+// OTA_PASSWORD : voir Secrets.h
 
 // ============================================================
 // POSITION GEOGRAPHIQUE (meteo en ligne / calcul solaire)
 // ============================================================
 
-#define LATITUDE_DEG    47.1108
-#define LONGITUDE_DEG    6.3032
-#define ALTITUDE_M       729
+// LATITUDE_DEG, LONGITUDE_DEG, ALTITUDE_M : voir Secrets.h
 
 // ============================================================
 // MOTEURS - 2 ponts en H BTS7960 / IBT_2 (l'un serigraphie HW-039)
@@ -198,6 +203,56 @@
 // chaque redemarrage ou coupure de courant. Pas encore de
 // persistance en flash (Preferences / NVS).
 #define NB_EVENEMENTS_VENT  8
+
+// ------------------------------------------------------------
+// AJOUT 1 - MISE A PLAT SUR RAFALES REPETEES
+// ------------------------------------------------------------
+// S'ajoute aux paliers existants, qui restent prioritaires et ne
+// sont jamais leves par cette regle. Mesure sur chaque echantillon
+// de l'ADC (toutes les PERIODE_ECHANT_MS = 100 ms).
+//   - une rafale = passage au-dessus de RAFALE_SEUIL_KMH ; pour en
+//     compter une autre, le vent doit d'abord repasser sous
+//     RAFALE_RESET_KMH (hysteresis anti double comptage) ;
+//   - RAFALE_NB rafales dans les RAFALE_FENETRE_MS dernieres
+//     millisecondes -> retour a plat ;
+//   - redeploiement apres REDEPLOIE_DELAI_MS consecutives sans
+//     aucun echantillon au-dessus de REDEPLOIE_CALME_KMH.
+// Non reglables depuis l'appli.
+#define RAFALE_SEUIL_KMH        30.0
+#define RAFALE_RESET_KMH        25.0
+#define RAFALE_NB               4
+#define RAFALE_FENETRE_MS       180000UL   // 3 min
+#define REDEPLOIE_CALME_KMH     20.0
+#define REDEPLOIE_DELAI_MS      900000UL   // 15 min
+#define RAFALE_HORODATAGES_MAX  16         // horodatages conserves (>= RAFALE_NB)
+
+// ------------------------------------------------------------
+// AJOUT 2 - ENREGISTREMENT DES RAFALES (bargraphe de l'appli)
+// ------------------------------------------------------------
+// Demarre des qu'un echantillon depasse ENREG_DEMARRAGE_KMH ; une
+// barre toutes les ENREG_PAS_MS = vitesse MAX de l'intervalle ;
+// s'arrete apres ENREG_ARRET_CALME_MS consecutives sous le seuil
+// (tout echantillon au-dessus relance le decompte).
+// 5760 barres x 15 s = 24 h. Sauvegarde dans LittleFS (partition
+// "spiffs" de 128 Ko) : 5760 barres horodatees ne tiennent pas dans
+// la partition NVS (20 Ko, deja partagee par les autres historiques).
+#define ENREG_DEMARRAGE_KMH     7.0
+#define ENREG_PAS_MS            15000UL    // une barre toutes les 15 s
+#define ENREG_ARRET_CALME_MS    1800000UL  // 30 min sous le seuil -> arret
+#define ENREG_NB_BARRES         5760       // 24 h de barres de 15 s
+#define ENREG_SAUVEGARDE_MS     300000UL   // sauvegarde en flash toutes les 5 min
+#define ENREG_FICHIER           "/rafales.bin"
+
+// ------------------------------------------------------------
+// SIMULATION DU VENT (TESTS UNIQUEMENT)
+// ------------------------------------------------------------
+// 1 = la vitesse mesuree est REMPLACEE par une valeur de test, reglee
+// par /api/sim-vent?kmh=35 ou par le scenario /api/sim-vent?scenario=rafales.
+// TOUTES les securites reagissent a la valeur simulee : moteurs
+// debranches pendant les essais. Doit rester a 0 en service.
+#ifndef SIMULATION_VENT
+#define SIMULATION_VENT         0
+#endif
 
 // ============================================================
 // POTENTIOMETRE 3B3 - inclinaison REELLE (4 fils, 2 curseurs)

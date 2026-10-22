@@ -79,3 +79,10 @@ bool lireDateHeureRTC(int& annee, int& mois, int& jour,
   heure = now.hour();  minute = now.minute(); seconde = now.second();
   return true;
 }
+
+// AJOUT 2 : horodatage des barres du bargraphe des rafales.
+bool lireEpochRTC(uint32_t& epoch) {
+  if (!rtcOK) return false;
+  epoch = rtc.now().unixtime();
+  return true;
+}

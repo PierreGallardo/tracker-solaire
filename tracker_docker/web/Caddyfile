@@ -65,7 +65,9 @@
 	# le reseau local (http://192.168.1.60).
 	# Prefixe, sans tenir compte des majuscules : couvre aussi "/monter/",
 	# "/MONTER" ou "/api/calib-jog?..." encode.
-	@mouvement path_regexp (?i)^/(monter|descendre|gauche|droite|suivi_auto|api/calib-)
+	# /api/sim-vent n'existe que dans la variante de TEST du firmware
+	# (vent simule) : refuse quand meme, au cas ou elle serait flashee.
+	@mouvement path_regexp (?i)^/(monter|descendre|gauche|droite|suivi_auto|api/calib-|api/sim-vent)
 	handle @mouvement {
 		header Content-Type "text/plain; charset=utf-8"
 		respond "Commande refusee a distance : le tracker ne peut pas etre deplace depuis Internet. Utiliser l'adresse locale de l'ESP32." 403

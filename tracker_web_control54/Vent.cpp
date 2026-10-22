@@ -2,11 +2,16 @@
 #include "Config.h"
 #include "CapteursI2C.h"   // horodatage RTC des evenements
 #include "Meteo.h"         // croisement avec le vent regional
+#include "EnregRafales.h"  // AJOUT 2 : bargraphe des rafales (un appel par echantillon)
 
 #include <ArduinoJson.h>
 #include <Preferences.h>   // NVS : persistance de l'historique
 
 static Preferences prefs;
+
+// AJOUT 1 : cause des mises a plat sur rafales repetees (historique NVS
+// et alerte). Litteral unique : histCause garde un pointeur dessus.
+static const char CAUSE_RAFALES_REPETEES[] = "rafales repetees";
 static bool nvsOuvert = false;
 
 // --- Acquisition analogique ---------------------------------
@@ -98,7 +103,10 @@ static void chargerHistoriqueVent() {
     histVitesse[histIndex] = v;
     // On repointe vers les litteraux statiques : histCause ne doit
     // jamais pointer vers une String temporaire.
-    histCause[histIndex] = (c == "rafale") ? "rafale" : "moyenne";
+    // AJOUT 1 : troisieme cause possible, "rafales repetees".
+    histCause[histIndex] = (c == "rafale") ? "rafale"
+                         : (c == CAUSE_RAFALES_REPETEES) ? CAUSE_RAFALES_REPETEES
+                         : "moyenne";
 
     histIndex = (histIndex + 1) % NB_EVENEMENTS_VENT;
     if (histRempli < NB_EVENEMENTS_VENT) histRempli++;
@@ -127,7 +135,8 @@ void initHistoriqueVentNVS() {
 // change rien au comportement des moteurs.
 static bool          alerteVentEnAttente = false;
 static float         alerteVitesse       = 0.0;
-static char          alerteCause[9]      = "";
+// AJOUT 1 : 17 octets (au lieu de 9) pour contenir "rafales repetees".
+static char          alerteCause[17]     = "";
 static char          alerteHeure[9]      = "";
 
 static void enregistrerEvenementVent(float vitesse, const char* cause) {
@@ -434,6 +443,130 @@ void setupAnemometre() {
   derniereActivite = millis();   // amorce : pas d'alerte "silence" des le boot
 }
 
+// ============================================================
+// AJOUT 1 - MISE A PLAT SUR RAFALES REPETEES
+// ------------------------------------------------------------
+// Une rafale isolee a 35 km/h ne declenche rien ; quatre en trois
+// minutes signalent un vent instable qui fatigue la structure.
+// Cette regle a son propre etat (miseAPlatRafales) : elle ne lit ni
+// ne modifie securiteVentActive, si bien qu'elle ne peut jamais lever
+// une mise en securite des paliers existants. Le retour a plat est
+// demande tant que l'une OU l'autre est active (ventMiseAPlatRequise).
+// ============================================================
+
+static unsigned long rafHorodatages[RAFALE_HORODATAGES_MAX]; // millis() de chaque rafale
+static int           rafIndex  = 0;
+static int           rafRempli = 0;
+static bool          rafAuDessus = false;   // hysteresis : en cours de rafale
+static bool          miseAPlatRafales = false;
+static unsigned long debutCalmeRafales = 0; // debut des 15 min sans > 20 km/h
+
+// Nombre de rafales dont l'horodatage est dans la fenetre glissante.
+static int rafalesDansFenetre() {
+  int n = 0;
+  unsigned long now = millis();
+  for (int i = 0; i < rafRempli; i++) {
+    if (now - rafHorodatages[i] <= RAFALE_FENETRE_MS) n++;
+  }
+  return n;
+}
+
+// Appelee pour chaque echantillon de l'ADC (toutes les 100 ms).
+static void traiterRafalesRepetees(float kmh) {
+  unsigned long now = millis();
+
+  // --- Comptage avec hysteresis : 30 km/h pour compter, 25 pour rearmer ---
+  if (!rafAuDessus && kmh > RAFALE_SEUIL_KMH) {
+    rafAuDessus = true;
+    rafHorodatages[rafIndex] = now;
+    rafIndex = (rafIndex + 1) % RAFALE_HORODATAGES_MAX;
+    if (rafRempli < RAFALE_HORODATAGES_MAX) rafRempli++;
+
+    int n = rafalesDansFenetre();
+    Serial.printf("Rafale > %.0f km/h (%.1f) : %d dans les %lu dernieres minutes.\n",
+                  (double)RAFALE_SEUIL_KMH, kmh, n, RAFALE_FENETRE_MS / 60000UL);
+
+    // --- Declenchement : 4 rafales dans la fenetre ---
+    if (n >= RAFALE_NB && !miseAPlatRafales) {
+      miseAPlatRafales = true;
+      debutCalmeRafales = 0;
+      enregistrerEvenementVent(kmh, CAUSE_RAFALES_REPETEES);
+      Serial.printf("RAFALES REPETEES : %d en %lu min - retour a plat automatique !\n",
+                    n, RAFALE_FENETRE_MS / 60000UL);
+    }
+  } else if (rafAuDessus && kmh < RAFALE_RESET_KMH) {
+    rafAuDessus = false;
+  }
+
+  // --- Redeploiement : 15 min consecutives sans echantillon > 20 km/h ---
+  if (miseAPlatRafales) {
+    if (kmh > REDEPLOIE_CALME_KMH) {
+      if (debutCalmeRafales != 0) {
+        Serial.printf("Vent a %.1f km/h : delai de redeploiement (rafales) remis a zero.\n", kmh);
+      }
+      debutCalmeRafales = 0;
+    } else if (debutCalmeRafales == 0) {
+      debutCalmeRafales = now;
+    } else if (now - debutCalmeRafales >= REDEPLOIE_DELAI_MS) {
+      miseAPlatRafales = false;
+      debutCalmeRafales = 0;
+      Serial.println("Rafales repetees : 15 min de calme, fin de la mise a plat.");
+    }
+  }
+}
+
+// ============================================================
+// SIMULATION DU VENT (compilee seulement si SIMULATION_VENT = 1)
+// ------------------------------------------------------------
+// Remplace la vitesse calculee depuis l'ADC par une valeur de test,
+// pour verifier toute la chaine (securites, rafales repetees,
+// bargraphe) sans attendre un jour de vent.
+// ============================================================
+#if SIMULATION_VENT
+#warning "SIMULATION_VENT active : la vitesse du vent est SIMULEE. A remettre a 0 avant usage reel."
+
+static float simKmh = 0.0;
+
+// Scenario "rafales" : 4 rafales a 34-38 km/h en moins de 2 min,
+// separees par des retombees a 15 km/h (sous le rearmement a 25),
+// puis 12 km/h : le bargraphe continue d'enregistrer, le delai de
+// redeploiement court (12 < 20).
+struct EtapeSim { unsigned long dureeMs; float kmh; };
+static const EtapeSim SCENARIO_RAFALES[] = {
+  {10000, 10}, {4000, 35}, {15000, 15}, {4000, 36}, {15000, 15},
+  {4000, 34}, {15000, 15}, {4000, 38}, {0, 12}   // duree 0 = derniere etape, sans fin
+};
+static bool          simScenario = false;
+static int           simEtape = 0;
+static unsigned long simDebutEtape = 0;
+
+void simulationVentFixer(float kmh) {
+  simScenario = false;
+  simKmh = kmh;
+  Serial.printf("SIMULATION : vent fixe a %.1f km/h\n", kmh);
+}
+
+void simulationVentScenario() {
+  simScenario = true;
+  simEtape = 0;
+  simDebutEtape = millis();
+  Serial.println("SIMULATION : scenario rafales repetees demarre.");
+}
+
+static float simulationVitesse() {
+  if (simScenario) {
+    const EtapeSim &e = SCENARIO_RAFALES[simEtape];
+    if (e.dureeMs != 0 && millis() - simDebutEtape >= e.dureeMs) {
+      simEtape++;
+      simDebutEtape = millis();
+      Serial.printf("SIMULATION : etape %d, %.0f km/h\n", simEtape, SCENARIO_RAFALES[simEtape].kmh);
+    }
+    simKmh = SCENARIO_RAFALES[simEtape].kmh;
+  }
+  return simKmh;
+}
+#endif
+
 // Echantillonnage + fenetre longue (5 s) : moyenne, tendance, paliers.
 void updateVent() {
   // --- Echantillonnage regulier de l'ADC ---
@@ -441,11 +574,16 @@ void updateVent() {
     lastEchantillon = millis();
     tensionActuelleV = lireTensionAnemoV();
     float kmh = tensionActuelleV * FACTEUR_VOLT_KMH;
+#if SIMULATION_VENT
+    kmh = simulationVitesse();                     // TESTS : vitesse simulee
+#endif
 
     sommeFenetre += kmh;
     nbFenetre++;
     if (kmh > maxRafale) maxRafale = kmh;          // pic de la fenetre 2 s
     traiterEpisode(kmh);                           // suivi rapproche > 30 km/h
+    traiterRafalesRepetees(kmh);                   // AJOUT 1 : rafales repetees
+    enregRafalesEchantillon(kmh);                  // AJOUT 2 : bargraphe des rafales
 
     if (tensionActuelleV >= ANEMO_SEUIL_ACTIVITE_V) derniereActivite = millis();
     if (tensionActuelleV > tensionMaxVue) tensionMaxVue = tensionActuelleV;
@@ -565,3 +703,25 @@ bool          ventAlerteEnAttente() { return alerteVentEnAttente; }
 float         ventAlerteVitesse()   { return alerteVitesse; }
 const char*   ventAlerteCause()     { return alerteCause; }
 const char*   ventAlerteHeure()     { return alerteHeure; }
+
+// ============================================================
+// AJOUT 1 - ACCESSEURS DES RAFALES REPETEES
+// ============================================================
+
+// Retour a plat demande par les paliers existants OU par les rafales
+// repetees. C'est ce que lit le controle moteur ; ventSecuriteActive()
+// garde son sens d'origine (paliers existants seuls).
+bool ventMiseAPlatRequise() { return securiteVentActive || miseAPlatRafales; }
+
+bool ventMiseAPlatRafales() { return miseAPlatRafales; }
+int  ventNbRafalesFenetre() { return rafalesDansFenetre(); }
+
+// Secondes restantes avant le redeploiement de la regle rafales.
+// 0 si la mise a plat rafales est inactive, ou si le decompte n'a
+// pas demarre (vent encore au-dessus de 20 km/h).
+unsigned long ventSecondesAvantRedeploiement() {
+  if (!miseAPlatRafales || debutCalmeRafales == 0) return 0;
+  unsigned long ecoule = millis() - debutCalmeRafales;
+  if (ecoule >= REDEPLOIE_DELAI_MS) return 0;
+  return (REDEPLOIE_DELAI_MS - ecoule) / 1000UL;
+}

@@ -114,6 +114,18 @@ border-radius:4px;margin-left:6px;vertical-align:middle;}
 .histTabWrap{max-height:190px;overflow-y:auto;margin-top:12px;border:1px solid #262f42;border-radius:6px;}
 .histLoc th{position:sticky;top:0;background:#1f2738;font-size:10px;color:#9aa5b1;text-align:left;padding:4px;font-weight:600;}
 .histLoc th.hv{text-align:right;}
+/* AJOUT 2 : bargraphe des rafales */
+.bargRaf{margin-top:14px;padding-top:10px;border-top:1px solid #262f42;}
+.bargRaf h3{margin:0 0 6px;font-size:12px;color:#9aa5b1;font-weight:600;}
+.bargEtat{font-size:11px;color:#c7cedb;margin:0 0 6px;}
+.bargEtat .pt{display:inline-block;width:8px;height:8px;border-radius:50%;background:#607d8b;margin-right:6px;vertical-align:middle;}
+.bargEtat .pt.on{background:#F44336;box-shadow:0 0 6px #F44336;animation:anemoBlink 1.1s ease-in-out infinite;}
+.bargZoom{display:flex;gap:6px;margin:0 0 6px;}
+.bargZoom button{width:auto;margin:0;height:26px;padding:0 10px;font-size:11px;border-radius:6px;border:1px solid #34405a;background:#1a2130;color:#c7cedb;cursor:pointer;}
+.bargZoom button.actif{background:#2196F3;border-color:#2196F3;color:#fff;}
+#bargCanvas{display:block;width:100%;height:170px;background:rgba(255,255,255,0.03);border-radius:4px;}
+.bargLeg{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:10px;color:#9aa5b1;margin-top:5px;}
+.bargLeg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle;}
 .histDl{display:inline-block;margin-top:8px;font-size:11px;color:#64b5f6;text-decoration:none;}
 .gBarres div.enCours{opacity:0.4;}
 .gLegende{font-size:10px;color:#7a8894;margin:6px 0 0;}
@@ -206,6 +218,21 @@ oninput="offsetDebug=parseInt(this.value); document.getElementById('offsetVal').
 <h3>Mises en sécurité (vent)</h3>
 <ul id='histListe'></ul>
 <p class='petitNote'>Conservé en mémoire flash : survit aux redémarrages.</p>
+</div>
+<div class='bargRaf' id='bargRaf'>
+<h3>Enregistrement des rafales (vitesse max toutes les 15 s, 24 h glissantes)</h3>
+<p class='bargEtat' id='bargEtat'>--</p>
+<div class='bargZoom' id='bargZoom'>
+<button class='actif' onclick="rafZoom(86400,this)">24 h</button>
+<button onclick="rafZoom(21600,this)">6 h</button>
+<button onclick="rafZoom(3600,this)">1 h</button>
+</div>
+<canvas id='bargCanvas'></canvas>
+<div class='bargLeg'>
+<span><i style='background:#4CAF50'></i>7-20</span><span><i style='background:#FF9800'></i>20-40</span>
+<span><i style='background:#F44336'></i>40-70</span><span><i style='background:#4B0082;outline:1px solid #7a5cc0'></i>&ge; 70 km/h</span>
+<span>- - - 30 km/h · heures UTC</span>
+</div>
 </div>
 <div class='anemoAlerte' id='ventAlerte'>
 <b>⚠ MISE EN SÉCURITÉ VENT</b>
@@ -645,7 +672,8 @@ if(av){
 if(d.alerteVent){
 av.style.display='block';
 av.className='anemoAlerte vif';
-var src=(d.alerteCause=='rafale')?'Rafale':'Vent moyen';
+// AJOUT 1 : troisieme cause, rafales repetees.
+var src=(d.alerteCause=='rafale')?'Rafale':(d.alerteCause=='rafales repetees')?'Rafales répétées (dernière)':'Vent moyen';
 document.getElementById('ventAlerteTxt').textContent=
 src+' à '+(+d.alerteVitesse).toFixed(1)+' km/h, à '+d.alerteHeure+' (heure RTC)';
 var et=document.getElementById('ventAlerteEtat');
@@ -654,6 +682,10 @@ var t=d.secAvantLevee||0;
 et.textContent=(t>0)
 ? 'Sécurité toujours active — levée possible dans '+Math.ceil(t/60)+' min'
 : "Sécurité toujours active — attente d'une accalmie";
+} else if(d.miseAPlatRafales){ // AJOUT 1
+var r=d.secAvantRedeploiement||0;
+et.textContent=(r>0)?'Mise à plat (rafales répétées) — redéploiement dans '+Math.ceil(r/60)+' min'
+:'Mise à plat (rafales répétées) — attente de 15 min sous 20 km/h';
 } else { et.textContent='Sécurité levée.'; }
 } else { av.style.display='none'; }
 }
@@ -701,8 +733,12 @@ var t=d.secAvantLevee||0;
 sv.textContent=(t>0)
 ? '⚠ VENT FORT - levee possible dans '+Math.ceil(t/60)+' min'
 : "⚠ VENT FORT - attente d'une accalmie";
-} else { sv.textContent='OK'; }
-sv.style.color=d.securiteVent ? '#FF6B6B' : '#4CAF50'; }
+} else if(d.miseAPlatRafales){ // AJOUT 1
+var r=d.secAvantRedeploiement||0;
+sv.textContent=(r>0)?'⚠ RAFALES RÉPÉTÉES - redéploiement dans '+Math.ceil(r/60)+' min'
+:'⚠ RAFALES RÉPÉTÉES - attente de 15 min sous 20 km/h';
+} else { sv.textContent='OK'+(d.rafalesFenetre>0?' ('+d.rafalesFenetre+' rafale'+(d.rafalesFenetre>1?'s':'')+' > 30 km/h en 3 min)':''); }
+sv.style.color=(d.securiteVent||d.miseAPlatRafales) ? '#FF6B6B' : '#4CAF50'; }
 document.getElementById('pression').textContent=d.pression.toFixed(0);
 document.getElementById('meteoAge').textContent=d.meteoAge;
 var p=document.getElementById('pluieTxt');
@@ -875,6 +911,90 @@ tb.appendChild(tr);
 }).catch(function(){});
 }
 
+// ============================================================
+// AJOUT 2 - Bargraphe des rafales (canvas natif)
+// Le navigateur garde toutes les barres recues et ne demande que
+// les nouvelles (?depuis=), toutes les 15 s. Plusieurs barres par
+// pixel (vue 24 h sur un telephone) : on dessine le MAX de chaque
+// colonne de pixels, pour ne jamais masquer une rafale.
+// ============================================================
+var rafBarres=[], rafDernier=0, rafPortee=86400, rafInfo=null;
+function rafCouleur(v){ return (v>=70)?'#4B0082':(v>=40)?'#F44336':(v>=20)?'#FF9800':(v>=7)?'#4CAF50':'#607d8b'; }
+function rafHeure(t){ var d=new Date(t*1000); return ('0'+d.getUTCHours()).slice(-2)+':'+('0'+d.getUTCMinutes()).slice(-2); }
+function rafZoom(s,btn){
+rafPortee=s;
+var bs=document.querySelectorAll('#bargZoom button');
+for(var i=0;i<bs.length;i++) bs[i].className=(bs[i]===btn)?'actif':'';
+dessinerRafales();
+}
+function rafraichirRafales(){
+fetch('/api/rafales?depuis='+rafDernier).then(r=>r.json()).then(d=>{
+rafInfo=d;
+// Horloge revenue en arriere (RTC reglee) : on repart de zero.
+if(rafDernier&&d.maintenant&&d.maintenant+60<rafDernier){ rafBarres=[]; rafDernier=0; rafraichirRafales(); return; }
+(d.segments||[]).forEach(function(s){
+for(var i=0;i<s[1].length;i++){ var t=s[0]+i*d.pas; if(t>rafDernier){ rafBarres.push([t,s[1][i]/10]); rafDernier=t; } }
+});
+var lim=(d.maintenant||0)-86400;
+var k=0; while(k<rafBarres.length&&(rafBarres[k][0]<=lim||rafBarres.length-k>5760)) k++;
+if(k) rafBarres=rafBarres.slice(k);
+dessinerRafales();
+}).catch(function(){});
+}
+function dessinerRafales(){
+var cv=document.getElementById('bargCanvas'), d=rafInfo; if(!cv||!d) return;
+var et=document.getElementById('bargEtat'), txt;
+if(!d.rtc) txt="Horloge RTC absente : enregistrement impossible (pas d'heure pour les barres)";
+else if(d.enregistrement) txt="<span class='pt on'></span>Enregistrement en cours depuis "+rafHeure(d.debutSession)+' UTC';
+else txt="<span class='pt'></span>Enregistrement arrêté — reprend dès que le vent dépasse "+d.demarrage+' km/h';
+if(!d.stockage) txt+=' (mémoire flash indisponible : barres perdues au redémarrage)';
+et.innerHTML=txt;
+
+var dpr=window.devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight;
+if(cv.width!=Math.round(W*dpr)||cv.height!=Math.round(H*dpr)){ cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr); }
+var c=cv.getContext('2d'); c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,W,H);
+var mg=24, md=6, mh=6, mb=16, pw=W-mg-md, ph=H-mh-mb;
+var fin=d.maintenant||(rafBarres.length?rafBarres[rafBarres.length-1][0]:0), debut=fin-rafPortee;
+
+// Maximum par colonne de pixels.
+var col=new Float32Array(Math.max(1,Math.floor(pw))), vmax=0, nbVues=0, larg=d.pas/rafPortee*pw;
+for(var b=0;b<rafBarres.length;b++){
+var t=rafBarres[b][0], v=rafBarres[b][1];
+if(t+d.pas<=debut||t>fin) continue;
+nbVues++; if(v>vmax) vmax=v;
+var x0=(t-debut)/rafPortee*pw, i0=Math.max(0,Math.floor(x0)), i1=Math.min(col.length,Math.max(i0+1,Math.ceil(x0+larg)));
+for(var i=i0;i<i1;i++) if(v>col[i]) col[i]=v;
+}
+var ymax=Math.max(50,Math.ceil(vmax/10)*10), pasG=(ymax>80)?20:10;
+function y(v){ return mh+ph-(v/ymax)*ph; }
+
+// Grille et graduations (km/h).
+c.font='9px Arial'; c.lineWidth=1;
+for(var g=0;g<=ymax;g+=pasG){
+c.strokeStyle='rgba(255,255,255,0.07)'; c.beginPath(); c.moveTo(mg,Math.round(y(g))+0.5); c.lineTo(W-md,Math.round(y(g))+0.5); c.stroke();
+c.fillStyle='#7a8894'; c.textAlign='right'; c.fillText(g,mg-4,y(g)+3);
+}
+// Barres.
+for(var i=0;i<col.length;i++){
+if(col[i]<=0) continue;
+c.fillStyle=rafCouleur(col[i]); c.fillRect(mg+i,y(col[i]),1,mh+ph-y(col[i]));
+}
+// Ligne pointillee a 30 km/h.
+c.setLineDash([4,3]); c.strokeStyle='rgba(255,255,255,0.6)';
+c.beginPath(); c.moveTo(mg,Math.round(y(d.ligne))+0.5); c.lineTo(W-md,Math.round(y(d.ligne))+0.5); c.stroke(); c.setLineDash([]);
+// Etiquette sur fond sombre, lisible meme devant les barres.
+var lb=d.ligne+' km/h', lw=c.measureText(lb).width;
+c.fillStyle='rgba(15,20,32,0.85)'; c.fillRect(mg+2,y(d.ligne)-12,lw+6,11);
+c.fillStyle='#e4e8ee'; c.textAlign='left'; c.fillText(lb,mg+5,y(d.ligne)-3);
+// Axe des heures (UTC).
+c.fillStyle='#7a8894';
+for(var k=0;k<=4;k++){
+c.textAlign=(k==0)?'left':(k==4)?'right':'center';
+c.fillText(rafHeure(debut+k*rafPortee/4),mg+k*pw/4,H-3);
+}
+if(nbVues==0){ c.fillStyle='#7a8894'; c.textAlign='center'; c.fillText('Aucune barre sur cette période',mg+pw/2,mh+ph/2); }
+}
+
 // Episode de vent fort : 15 derniers releves (un toutes les 5 s),
 // barres colorees comme les voyants (vert <20, orange 20-40, rouge >40)
 // et tendance. Masque tant qu'aucun episode n'a eu lieu.
@@ -933,5 +1053,7 @@ rafraichirEpisode();setInterval(rafraichirEpisode,5000);
 rafraichirHistoLocal();setInterval(rafraichirHistoLocal,60000);
 rafraichirReleveVent();setInterval(rafraichirReleveVent,60000);
 rafraichirRelevesAnemo();setInterval(rafraichirRelevesAnemo,60000);
+rafraichirRafales();setInterval(rafraichirRafales,15000);   // AJOUT 2
+window.addEventListener('resize',dessinerRafales);
 </script>
 </body></html>)rawliteral";

@@ -1,4 +1,8 @@
-# Tracker solaire 2 axes — ESP32 (v54)
+# Tracker solaire 2 axes — ESP32 (v54 + rafales)
+
+> **Version en service depuis le 22 octobre 2026.** Ajouts par rapport à la v54 :
+> mise à plat sur rafales répétées et bargraphe des rafales. Détail, tests et
+> points à trancher : `MODIFICATIONS_RAFALES.md`.
 
 Restructuration du sketch monolithique en modules. **Le comportement fonctionnel
 est identique à la version précédente** : aucune logique métier n'a été modifiée,
@@ -20,12 +24,14 @@ compiler avec le sketch).
 |---|---|
 | `tracker_web_control54.ino` | `setup()` / `loop()` uniquement — l'enchaînement des sous-systèmes |
 | `Config.h` | **Toutes** les constantes matérielles : pinout, seuils, calibration, WiFi. Le seul fichier à éditer quand le matériel change |
+| `Secrets.h` | **Non versionné** : mots de passe WiFi et OTA, nom du réseau, position. Modèle : `Secrets.exemple.h` |
 | `Moteurs.h/.cpp` | Pilotage des 2 ponts en H BTS7960 (RPWM/LPWM, 4 canaux PWM) |
 | `Inclinaison.h/.cpp` | Mesure **réelle** de l'inclinaison via le potentiomètre 3B3 (2 curseurs, moyenne) |
 | `Azimut.h/.cpp` | Position azimutale : **estimée** par le temps de commande, **mesurée** par le codeur une fois la calibration validée |
 | `Vent.h/.cpp` | Anémomètre HWFS-1 (capteur **analogique** 0–3,3 V sur GPIO 32) : vitesse, rafale, tendance, sécurité, épisodes, historique NVS, diagnostic |
 | `HistoMeteo.h/.cpp` | Historique température / pression toutes les 30 min (24 points, NVS, export CSV) |
 | `HistoVent.h/.cpp` | Historique du vent : vent moyen et rafale max par demi-heure (24 points, NVS, export CSV) |
+| `EnregRafales.h/.cpp` | Bargraphe des rafales : barre max toutes les 15 s, 24 h, sauvegarde LittleFS |
 | `ReleveAnemo.h/.cpp` | Relevés de vérification de la constante vent : tension, vent local, vent régional, constante suggérée (NVS, CSV) |
 | `Solaire.h/.cpp` | Position du soleil (NOAA) et inclinaison cible du suivi automatique |
 | `Codeur.h/.cpp` | Codeur Baumer : outil de test par interruptions (`/codeur`) + comptage de service par le compteur matériel PCNT |
@@ -192,13 +198,14 @@ garder beaucoup plus, il faudrait surveiller la fragmentation.
   volontairement plus bas que le seuil de sécurité réel (50 km/h) : c'est un
   avertissement avant déclenchement, pas une incohérence.
 
-## État au 9 octobre 2026 et reste à faire
+## État au 22 octobre 2026 et reste à faire
 
 Fait et vérifié sur la carte :
 - Codeur Baumer : quadrature validée (0 erreur), 1800 impulsions/tour, 7200 pas/tour.
 - Capteur HOME SN04-N sur GPIO 33 : 10 passages = 10 détections.
 - Page `/calibration` : contrôles de saisie et refus à distance vérifiés, **sans moteur**.
 - Historique du vent par demi-heure et relevés de l'anémomètre : en ligne depuis le 9 octobre 2026.
+- Rafales répétées et bargraphe : en ligne depuis le 22 octobre 2026, **checklist de tests sur carte non faite**.
 
 Reste à faire :
 - Brancher les moteurs et le potentiomètre 3B3 sur le tracker.

@@ -31,3 +31,8 @@ bool lireHeureRTC(char* buf, size_t taille);
 // RTC en UTC). Retourne false si la RTC est absente.
 bool lireDateHeureRTC(int& annee, int& mois, int& jour,
                       int& heure, int& minute, int& seconde);
+
+// AJOUT 2 : secondes depuis le 1er janvier 1970 (UTC), pour horodater
+// les barres du bargraphe des rafales. Lecture seule de la RTC.
+// Retourne false si la RTC est absente.
+bool lireEpochRTC(uint32_t& epoch);

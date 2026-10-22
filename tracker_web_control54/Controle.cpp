@@ -201,11 +201,13 @@ void updateControle() {
   }
 }
 
-// Securite vent : retour a plat automatique si vent trop fort
+// Securite vent : retour a plat automatique si vent trop fort.
+// AJOUT 1 : ventMiseAPlatRequise() (au lieu de ventSecuriteActive())
+// couvre aussi la mise a plat sur rafales repetees.
 void appliquerSecuriteVent() {
-  if (ventSecuriteActive() && !retourAPlatActif) {
+  if (ventMiseAPlatRequise() && !retourAPlatActif) {
     retourAPlatActif = true;
-    etatVertical = "RETOUR A PLAT (VENT)";
+    etatVertical = ventSecuriteActive() ? "RETOUR A PLAT (VENT)" : "RETOUR A PLAT (RAFALES)";
     arretAutoVerticalAt = 0;
   }
 }
