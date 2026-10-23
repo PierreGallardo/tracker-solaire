@@ -58,6 +58,20 @@ td{padding:6px 4px;text-align:left;border-bottom:1px solid #262f42;}
 .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;color:white;margin-left:6px;}
 .mesure{background:#4CAF50;} .estime{background:#FF9800;}
 #threeWrap{width:100%;height:540px;margin:10px auto;border-radius:10px;overflow:hidden;background:#9ec4e4;}
+/* Jauge du vent local (style plat : ni degrade ni ombre) */
+.ventJauge{margin:14px auto 0;max-width:340px;text-align:center;}
+.ventJauge svg{display:block;width:100%;height:auto;}
+.jgVal{font-size:22px;font-weight:bold;fill:#e4e8ee;}
+.jgUnite{font-size:11px;fill:#9aa5b1;}
+.jgGrad{font-size:10px;fill:#9aa5b1;font-variant-numeric:tabular-nums;}
+.jgHors{display:none;margin:2px 0 0;font-size:11px;color:#c7cedb;}
+.ventBandeau{margin:8px 0 0;padding:9px 12px;border-radius:8px;font-size:14px;font-weight:bold;
+text-align:center;background:#2a3346;color:#c7cedb;}
+.ventBandeau.rouge{background:#d03b3b;color:#fff;}
+.ventBandeau.orange{background:#ec835a;color:#10141c;}
+.ventBandeau.jaune{background:#fab219;color:#10141c;}
+.ventBandeau.vert{background:#0ca30c;color:#10141c;}
+.ventRafLigne{margin:8px 0 0;font-size:13px;color:#c7cedb;text-align:center;font-variant-numeric:tabular-nums;}
 .ventVoyants{display:flex;align-items:center;gap:16px;margin:14px 0;padding-top:10px;border-top:1px solid #262f42;}
 .ventLampGroup{display:flex;flex-direction:column;align-items:center;gap:4px;}
 .ventLamp{width:18px;height:18px;border-radius:50%;background:#2a3346;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);}
@@ -75,12 +89,15 @@ background:rgba(255,152,0,0.12);border:1px solid rgba(255,152,0,0.45);color:#FFB
 .histVent{display:none;margin-top:14px;padding-top:10px;border-top:1px solid #262f42;}
 .histVent h3{margin:0 0 6px;font-size:12px;color:#9aa5b1;font-weight:600;}
 .histVent ul{list-style:none;margin:0;padding:0;font-size:12px;}
-.histVent li{display:flex;justify-content:space-between;gap:8px;padding:3px 0;
+.histVent li{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 8px;padding:3px 0;
 border-bottom:1px solid #222a3a;color:#c7cedb;}
 .histVent li:last-child{border-bottom:none;}
 .histVent .hHeure{color:#9aa5b1;font-variant-numeric:tabular-nums;}
 .histVent .hCause{font-size:10px;padding:1px 6px;border-radius:8px;background:#2a3346;color:#9aa5b1;}
 .histVent .hCause.rafale{background:#5a3a12;color:#FFB74D;}
+.histVent .hCause.plat{background:#d03b3b;color:#fff;}
+.histVent .hCause.palier{background:#ec835a;color:#10141c;}
+.histVent .hCause.redeploiement{background:#0ca30c;color:#10141c;}
 .histVent .petitNote{font-size:10px;color:#7a8894;margin:6px 0 0;}
 .episodeVent{display:none;margin-top:14px;padding-top:10px;border-top:1px solid #262f42;}
 .episodeVent h3{margin:0 0 6px;font-size:12px;color:#9aa5b1;font-weight:600;}
@@ -201,6 +218,18 @@ oninput="offsetDebug=parseInt(this.value); document.getElementById('offsetVal').
 <tr><td>Pression</td><td><span id='pression'>--</span> hPa</td></tr>
 <tr><td>Pression locale</td><td><span id='pressionLocale'>--</span></td></tr>
 </table>
+<div class='ventJauge'>
+<svg id='jgSvg' viewBox='0 0 240 150' role='img' aria-label='Jauge du vent local, 0 à 90 km/h'>
+<g id='jgZones'></g><g id='jgGrads'></g>
+<line id='jgAiguille' x1='120' y1='112' x2='40' y2='112' stroke='#e4e8ee' stroke-width='3' stroke-linecap='round'/>
+<circle cx='120' cy='112' r='6' fill='#e4e8ee'/>
+<text class='jgVal' id='jgVal' x='120' y='140' text-anchor='middle'>--</text>
+<text class='jgUnite' x='120' y='80' text-anchor='middle'>vent local</text>
+</svg>
+<p class='jgHors' id='jgHors'>Au-delà de l'échelle, aiguille au maximum</p>
+</div>
+<p class='ventBandeau' id='ventBandeau'>--</p>
+<p class='ventRafLigne' id='ventRafLigne'>Rafales ≥ 30 km/h sur 3 min : --</p>
 <div class='ventVoyants'>
 <div class='ventLampGroup'><span class='ventLamp' id='ventLampGreen'></span><span class='ventLampLbl'>0-20</span></div>
 <div class='ventLampGroup'><span class='ventLamp' id='ventLampOrange'></span><span class='ventLampLbl'>20-40</span></div>
@@ -215,7 +244,7 @@ oninput="offsetDebug=parseInt(this.value); document.getElementById('offsetVal').
 <p class='epTend' id='epTend'></p>
 </div>
 <div class='histVent' id='histVent'>
-<h3>Mises en sécurité (vent)</h3>
+<h3>8 derniers événements vent (heure de Paris)</h3>
 <ul id='histListe'></ul>
 <p class='petitNote'>Conservé en mémoire flash : survit aux redémarrages.</p>
 </div>
@@ -229,8 +258,8 @@ oninput="offsetDebug=parseInt(this.value); document.getElementById('offsetVal').
 </div>
 <canvas id='bargCanvas'></canvas>
 <div class='bargLeg'>
-<span><i style='background:#4CAF50'></i>7-20</span><span><i style='background:#FF9800'></i>20-40</span>
-<span><i style='background:#F44336'></i>40-70</span><span><i style='background:#4B0082;outline:1px solid #7a5cc0'></i>&ge; 70 km/h</span>
+<span><i style='background:#0ca30c'></i>7-20</span><span><i style='background:#ec835a'></i>20-40</span>
+<span><i style='background:#d03b3b'></i>40-70</span><span><i style='background:#534AB7'></i>&ge; 70 km/h</span>
 <span>- - - 30 km/h · heures UTC</span>
 </div>
 </div>
@@ -641,6 +670,69 @@ window.addEventListener('resize',function(){
 camera.aspect=wrap.clientWidth/wrap.clientHeight; camera.updateProjectionMatrix();
 renderer.setSize(wrap.clientWidth, wrap.clientHeight);});
 function cmd(url){fetch(url).then(refresh);}
+// Heure NTP du tracker, au fuseau de Paris (decalage calcule par
+// l'ESP32 avec la regle POSIX). La page l'avance seule chaque seconde
+// entre deux /status : pas de saut si une requete arrive en retard.
+var heureRef=null;
+var JOURS=['dim','lun','mar','mer','jeu','ven','sam'];
+var MOIS=['jan','fév','mar','avr','mai','juin','juil','aoû','sep','oct','nov','déc'];
+function deux(n){ return ('0'+n).slice(-2); }
+function afficherHeure(){
+var el=document.getElementById('heureLigne'); if(!el) return;
+if(!heureRef){ el.textContent='| Heure NTP indisponible'; return; }
+var t=heureRef.epoch+heureRef.decalage+Math.floor((Date.now()-heureRef.recu)/1000);
+var d=new Date(t*1000);   // champs UTC = heure de Paris, decalage deja ajoute
+el.textContent='| '+JOURS[d.getUTCDay()]+' '+deux(d.getUTCDate())+' '+MOIS[d.getUTCMonth()]+' '
++deux(d.getUTCHours())+':'+deux(d.getUTCMinutes())+':'+deux(d.getUTCSeconds());
+}
+setInterval(afficherHeure,1000);
+
+// Jauge du vent local : demi-cercle de 0 a 90 km/h. L'aiguille est
+// bornee a 90 ; au-dela, la vraie vitesse reste ecrite au centre.
+var JG_MAX=90, JG_CX=120, JG_CY=112, JG_R=88;
+var JG_ZONES=[[0,20,'#0ca30c'],[20,40,'#fab219'],[40,50,'#ec835a'],[50,70,'#d03b3b'],[70,90,'#534AB7']];
+var JG_GRADS=[0,20,40,50,70,90];
+function jgPoint(v,r){
+var a=Math.PI*(1-v/JG_MAX);
+return [(JG_CX+r*Math.cos(a)).toFixed(1),(JG_CY-r*Math.sin(a)).toFixed(1)];
+}
+(function(){
+var ns='http://www.w3.org/2000/svg', zg=document.getElementById('jgZones'), gg=document.getElementById('jgGrads');
+JG_ZONES.forEach(function(z){
+var p0=jgPoint(z[0],JG_R), p1=jgPoint(z[1],JG_R), e=document.createElementNS(ns,'path');
+e.setAttribute('d','M'+p0[0]+' '+p0[1]+' A'+JG_R+' '+JG_R+' 0 0 1 '+p1[0]+' '+p1[1]);
+e.setAttribute('fill','none'); e.setAttribute('stroke',z[2]); e.setAttribute('stroke-width','16');
+zg.appendChild(e);
+});
+JG_GRADS.forEach(function(v){
+var a=jgPoint(v,JG_R+9), b=jgPoint(v,JG_R+13), t=jgPoint(v,JG_R+21);
+var l=document.createElementNS(ns,'line');
+l.setAttribute('x1',a[0]); l.setAttribute('y1',a[1]); l.setAttribute('x2',b[0]); l.setAttribute('y2',b[1]);
+l.setAttribute('stroke','#9aa5b1'); l.setAttribute('stroke-width','1.5'); gg.appendChild(l);
+var x=document.createElementNS(ns,'text');
+x.setAttribute('x',t[0]); x.setAttribute('y',(+t[1]+3).toFixed(1)); x.setAttribute('class','jgGrad');
+x.setAttribute('text-anchor','middle'); x.textContent=v; gg.appendChild(x);
+});
+})();
+function majJauge(v){
+var p=jgPoint(Math.min(Math.max(v,0),JG_MAX),JG_R-16), al=document.getElementById('jgAiguille');
+al.setAttribute('x2',p[0]); al.setAttribute('y2',p[1]);
+document.getElementById('jgVal').textContent=Math.round(v)+' km/h';
+document.getElementById('jgHors').style.display=(v>JG_MAX)?'block':'none';
+}
+// Bandeau : texte choisi par le firmware (d.etatVent), jamais recalcule ici.
+var BANDEAUX={
+'plat-tres-fort':['Vent très fort : mise à plat','rouge'],
+'plat':['Mise à plat : vent ≥ 50 km/h','rouge'],
+'plat-rafales':['Mise à plat : rafales répétées','rouge'],
+'palier':['Palier 40-50 km/h : inclinaison limitée à 20°','orange'],
+'modere':['Vent modéré : suivi normal','jaune'],
+'faible':['Vent faible : suivi normal','vert']};
+function majBandeau(etat){
+var el=document.getElementById('ventBandeau'), b=BANDEAUX[etat];
+el.textContent=b?b[0]:'État du vent indisponible';
+el.className='ventBandeau'+(b?' '+b[1]:'');
+}
 function refresh(){
 fetch('/status').then(r=>r.json()).then(d=>{
 azCible=d.az; inclCible=d.incl;
@@ -652,7 +744,8 @@ document.getElementById('etatH').textContent=d.etatH;
 document.getElementById('secV').textContent=(d.secV>0)?' (arret auto dans '+d.secV+'s)':'';
 document.getElementById('secH').textContent=(d.secH>0)?' (arret auto dans '+d.secH+'s)':'';
 document.getElementById('infoLigne').textContent='Uptime: '+d.uptime+'s | WiFi: '+d.rssi+' dBm';
-document.getElementById('heureLigne').textContent=d.rtcOK ? ('| '+d.heureRTC+' (RTC)') : '| RTC indisponible';
+if(d.ntpOK){ heureRef={epoch:d.epoch,decalage:d.decalage,recu:Date.now()}; } else { heureRef=null; }
+afficherHeure();
 var lg=document.getElementById('ventLampGreen'),lo=document.getElementById('ventLampOrange'),lr=document.getElementById('ventLampRed');
 lg.className='ventLamp'; lo.className='ventLamp'; lr.className='ventLamp';
 if(d.ventKmh<20){lg.classList.add('on-green');}else if(d.ventKmh<40){lo.classList.add('on-orange');}else{lr.classList.add('on-red');}
@@ -660,6 +753,11 @@ var ta=document.getElementById('ventTrendArrow'); ta.className='ventTrend';
 if(d.trend=='up'){ta.textContent='↑';ta.classList.add('up');}
 else if(d.trend=='down'){ta.textContent='↓';ta.classList.add('down');}
 else{ta.textContent='→';ta.classList.add('stable');}
+if(typeof d.ventKmh==='number') majJauge(d.ventKmh);
+majBandeau(d.etatVent);
+// Rafales comptees par le firmware (regle de mise a plat sur rafales repetees).
+document.getElementById('ventRafLigne').textContent='Rafales ≥ 30 km/h sur 3 min : '
++((typeof d.rafalesFenetre==='number'&&typeof d.rafalesNb==='number')?d.rafalesFenetre+' / '+d.rafalesNb:'non implémenté');
 var vr=document.getElementById('ventRafale');
 if(vr&&typeof d.ventRafaleKmh==='number') vr.textContent=d.ventRafaleKmh.toFixed(1);
 var vrm=document.getElementById('ventReduitMsg');
@@ -675,7 +773,7 @@ av.className='anemoAlerte vif';
 // AJOUT 1 : troisieme cause, rafales repetees.
 var src=(d.alerteCause=='rafale')?'Rafale':(d.alerteCause=='rafales repetees')?'Rafales répétées (dernière)':'Vent moyen';
 document.getElementById('ventAlerteTxt').textContent=
-src+' à '+(+d.alerteVitesse).toFixed(1)+' km/h, à '+d.alerteHeure+' (heure RTC)';
+src+' à '+(+d.alerteVitesse).toFixed(1)+' km/h, à '+d.alerteHeure;
 var et=document.getElementById('ventAlerteEtat');
 if(d.securiteVent){
 var t=d.secAvantLevee||0;
@@ -919,7 +1017,7 @@ tb.appendChild(tr);
 // colonne de pixels, pour ne jamais masquer une rafale.
 // ============================================================
 var rafBarres=[], rafDernier=0, rafPortee=86400, rafInfo=null;
-function rafCouleur(v){ return (v>=70)?'#4B0082':(v>=40)?'#F44336':(v>=20)?'#FF9800':(v>=7)?'#4CAF50':'#607d8b'; }
+function rafCouleur(v){ return (v>=70)?'#534AB7':(v>=40)?'#d03b3b':(v>=20)?'#ec835a':(v>=7)?'#0ca30c':'#607d8b'; }
 function rafHeure(t){ var d=new Date(t*1000); return ('0'+d.getUTCHours()).slice(-2)+':'+('0'+d.getUTCMinutes()).slice(-2); }
 function rafZoom(s,btn){
 rafPortee=s;
@@ -953,7 +1051,7 @@ et.innerHTML=txt;
 var dpr=window.devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight;
 if(cv.width!=Math.round(W*dpr)||cv.height!=Math.round(H*dpr)){ cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr); }
 var c=cv.getContext('2d'); c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,W,H);
-var mg=24, md=6, mh=6, mb=16, pw=W-mg-md, ph=H-mh-mb;
+var mg=6, md=6, mh=6, mb=16, pw=W-mg-md, ph=H-mh-mb;   // pas d'axe Y chiffre : marge gauche reduite
 var fin=d.maintenant||(rafBarres.length?rafBarres[rafBarres.length-1][0]:0), debut=fin-rafPortee;
 
 // Maximum par colonne de pixels.
@@ -968,11 +1066,10 @@ for(var i=i0;i<i1;i++) if(v>col[i]) col[i]=v;
 var ymax=Math.max(50,Math.ceil(vmax/10)*10), pasG=(ymax>80)?20:10;
 function y(v){ return mh+ph-(v/ymax)*ph; }
 
-// Grille et graduations (km/h).
+// Grille discrete, sans valeurs : l'axe Y n'est pas chiffre.
 c.font='9px Arial'; c.lineWidth=1;
 for(var g=0;g<=ymax;g+=pasG){
 c.strokeStyle='rgba(255,255,255,0.07)'; c.beginPath(); c.moveTo(mg,Math.round(y(g))+0.5); c.lineTo(W-md,Math.round(y(g))+0.5); c.stroke();
-c.fillStyle='#7a8894'; c.textAlign='right'; c.fillText(g,mg-4,y(g)+3);
 }
 // Barres.
 for(var i=0;i<col.length;i++){
@@ -1028,6 +1125,13 @@ else{ t.innerHTML="Vent stable <span class='fl plat'>&rarr;</span>"; }
 }).catch(function(){});
 }
 
+// Libelle et couleur de chaque type d'evenement de /api/historique-vent.
+var TYPES_EVT={
+'moyenne':['Mise à plat (vent moyen)','plat'],
+'rafale':['Mise à plat (rafale)','plat'],
+'rafales repetees':['Mise à plat (rafales répétées)','plat'],
+'palier':['Palier 40-50 km/h','palier'],
+'redeploiement':['Redéploiement','redeploiement']};
 function rafraichirHistorique(){
 fetch('/api/historique-vent').then(r=>r.json()).then(evts=>{
 var box=document.getElementById('histVent'), ul=document.getElementById('histListe');
@@ -1037,10 +1141,11 @@ ul.innerHTML='';
 for(var i=evts.length-1;i>=0;i--){
 var e=evts[i];
 var li=document.createElement('li');
-var h=document.createElement('span'); h.className='hHeure'; h.textContent=e.h;
+// Evenements d'avant le passage a l'heure NTP : "HH:MM:SS" en UTC.
+var h=document.createElement('span'); h.className='hHeure'; h.textContent=(e.h.length==8)?e.h+' UTC':e.h;
 var v=document.createElement('span'); v.textContent=e.v.toFixed(1)+' km/h';
-var c=document.createElement('span');
-c.className='hCause'+(e.c=='rafale'?' rafale':''); c.textContent=e.c;
+var c=document.createElement('span'), ty=TYPES_EVT[e.c]||['Mise à plat ('+e.c+')','plat'];
+c.className='hCause '+ty[1]; c.textContent=ty[0];
 li.appendChild(h); li.appendChild(v); li.appendChild(c);
 ul.appendChild(li);
 }
