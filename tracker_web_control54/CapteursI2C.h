@@ -14,9 +14,31 @@
 // Retourne true si au moins l'un des deux a repondu.
 bool setupCapteursI2C();
 
-// Regle la RTC depuis un serveur NTP. A appeler une seule fois,
-// apres la connexion WiFi. Sans effet si la RTC est absente.
+// Demarre l'heure systeme NTP au fuseau Europe/Paris (heure d'ete
+// automatique, resynchronisee toutes les heures par le SNTP), puis
+// regle la RTC en UTC si elle est presente. A appeler une seule
+// fois, apres la connexion WiFi.
 void synchroniserRTCDepuisNTP();
+
+// --- Heure systeme NTP (affichage uniquement) ----------------
+// La RTC reste la source de temps du calcul solaire, des
+// historiques et du bargraphe (en UTC) ; l'affichage utilise
+// l'heure NTP, en heure de Paris.
+
+// true une fois la premiere synchronisation NTP obtenue.
+bool heureNTPValide();
+
+// Secondes UTC depuis 1970 (heure systeme NTP). 0 si non valide.
+uint32_t epochNTP();
+
+// Decalage de l'heure de Paris sur l'UTC, en secondes (3600 en
+// hiver, 7200 en ete), tire de la regle POSIX du fuseau.
+long decalageParisSecondes();
+
+// Ecrit l'heure de Paris dans buf selon le format strftime donne
+// (%d, %m, %Y, %H, %M, %S...). Retourne false si l'heure NTP n'est
+// pas encore valide.
+bool formaterHeureParis(char* buf, size_t taille, const char* format);
 
 bool bmp280Present();
 bool rtcPresente();

@@ -106,9 +106,12 @@ const String& ventTendance();
 // reduit, VITESSE_MANUELLE sinon.
 uint8_t ventVitesseMoteur();
 
-// Serialise l'historique des mises en securite au format
-// [{"h":"14:32:05","v":52.3,"c":"moyenne"}, ...]
+// Serialise les NB_EVENEMENTS_VENT derniers evenements vent au format
+// [{"h":"23/10/2026 14:32:05","v":52.3,"c":"moyenne"}, ...]
+// (heure NTP de Paris ; "HH:MM:SS" UTC pour les evenements anterieurs)
 // du plus ancien au plus recent. Renvoie "[]" si aucun evenement.
+// c : "moyenne" / "rafale" / "rafales repetees" (mises a plat),
+//     "palier" (entree dans le mode reduit), "redeploiement".
 String historiqueVentJson();
 
 // ============================================================
@@ -127,6 +130,17 @@ bool ventMiseAPlatRequise();
 bool          ventMiseAPlatRafales();          // la regle rafales est active
 int           ventNbRafalesFenetre();          // rafales dans les 3 dernieres min
 unsigned long ventSecondesAvantRedeploiement(); // 0 si inactif ou decompte non demarre
+
+// --- Bandeau d'etat de l'interface (affichage uniquement) -----
+// Traduit l'etat reel des paliers en un code pour la page web, sans
+// rien recalculer ni modifier :
+//   "plat-tres-fort" : mise a plat (paliers) et vent moyen >= 70 km/h
+//   "plat"           : mise a plat par les paliers (moyenne ou rafale >= 50)
+//   "plat-rafales"   : mise a plat sur rafales repetees
+//   "palier"         : mode reduit 40-50 km/h (inclinaison <= 20 deg)
+//   "modere"         : suivi normal, vent moyen >= 20 km/h
+//   "faible"         : suivi normal, vent moyen < 20 km/h
+const char* ventEtatAffichage();
 
 #if SIMULATION_VENT
 // TESTS : vitesse fixe, ou scenario de 4 rafales en moins de 2 min.
