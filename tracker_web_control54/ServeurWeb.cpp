@@ -93,6 +93,8 @@ static void handleStatus() {
   doc["rafalesFenetre"]        = ventNbRafalesFenetre();
   doc["miseAPlatRafales"]      = ventMiseAPlatRafales();
   doc["secAvantRedeploiement"] = ventSecondesAvantRedeploiement();
+  doc["rafalesNb"]             = RAFALE_NB;          // rafales qui declenchent la mise a plat
+  doc["etatVent"]              = ventEtatAffichage(); // bandeau sous la jauge
   // AJOUT 2 : etat du bargraphe (le detail est sur /api/rafales)
   doc["enregRafales"]          = enregRafalesActif();
   doc["alerteVent"]     = ventAlerteEnAttente();
@@ -112,6 +114,13 @@ static void handleStatus() {
   char buf[20];
   if (lireHeureRTC(buf, sizeof(buf))) {
     doc["heureRTC"] = buf;
+  }
+  // Heure affichee : heure systeme NTP, la page l'avance seule chaque
+  // seconde a partir de l'epoch UTC et du decalage de Paris.
+  doc["ntpOK"] = heureNTPValide();
+  if (heureNTPValide()) {
+    doc["epoch"]    = epochNTP();
+    doc["decalage"] = decalageParisSecondes();
   }
 
   String out;

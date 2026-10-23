@@ -42,19 +42,60 @@ bool setupCapteursI2C() {
   return bmeOK || rtcOK;
 }
 
-// Regle la RTC depuis un serveur NTP (appele une fois si le WiFi est up)
-void synchroniserRTCDepuisNTP() {
-  if (!rtcOK || WiFi.status() != WL_CONNECTED) return;
+// Fuseau Europe/Paris en regle POSIX : CET (UTC+1) l'hiver, CEST
+// (UTC+2) du dernier dimanche de mars 2 h au dernier dimanche
+// d'octobre 3 h. Le changement d'heure est donc automatique.
+static const char TZ_EUROPE_PARIS[] = "CET-1CEST,M3.5.0,M10.5.0/3";
 
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
+// Au-dela du 1er janvier 2024 : l'horloge systeme a ete reglee par NTP
+// (au demarrage elle part de 1970).
+static const time_t EPOCH_NTP_MIN = 1704067200;
+
+// Demarre l'heure NTP (appele une fois si le WiFi est up) et regle la RTC
+void synchroniserRTCDepuisNTP() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  // Le SNTP continue ensuite seul en tache de fond (resynchro horaire).
+  configTzTime(TZ_EUROPE_PARIS, "pool.ntp.org", "time.google.com");
   struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 8000)) {
-    rtc.adjust(DateTime(timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                         timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
-    Serial.println("RTC synchronisee via NTP (UTC).");
-  } else {
+  if (!getLocalTime(&timeinfo, 8000)) {
     Serial.println("Echec synchro NTP, la RTC garde son heure actuelle.");
+    return;
   }
+  Serial.println("Heure NTP obtenue (fuseau Europe/Paris).");
+  if (!rtcOK) return;
+
+  // La RTC reste en UTC : getLocalTime() rend maintenant l'heure de
+  // Paris, on repart donc de l'heure systeme convertie en UTC.
+  time_t t = time(nullptr);
+  struct tm utc;
+  gmtime_r(&t, &utc);
+  rtc.adjust(DateTime(utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+                       utc.tm_hour, utc.tm_min, utc.tm_sec));
+  Serial.println("RTC synchronisee via NTP (UTC).");
+}
+
+bool heureNTPValide() { return time(nullptr) >= EPOCH_NTP_MIN; }
+
+uint32_t epochNTP() { return heureNTPValide() ? (uint32_t)time(nullptr) : 0; }
+
+long decalageParisSecondes() {
+  time_t t = time(nullptr);
+  struct tm loc, utc;
+  localtime_r(&t, &loc);
+  gmtime_r(&t, &utc);
+  // Ecart entre les deux decompositions : jamais plus d'un jour.
+  long d = (loc.tm_hour - utc.tm_hour) * 3600L + (loc.tm_min - utc.tm_min) * 60L;
+  if (loc.tm_yday != utc.tm_yday) d += (loc.tm_year > utc.tm_year || loc.tm_yday > utc.tm_yday) ? 86400L : -86400L;
+  return d;
+}
+
+bool formaterHeureParis(char* buf, size_t taille, const char* format) {
+  if (!heureNTPValide()) return false;
+  time_t t = time(nullptr);
+  struct tm loc;
+  localtime_r(&t, &loc);
+  return strftime(buf, taille, format, &loc) > 0;
 }
 
 bool bmp280Present() { return bmeOK; }

@@ -12,6 +12,10 @@ static Preferences prefs;
 // AJOUT 1 : cause des mises a plat sur rafales repetees (historique NVS
 // et alerte). Litteral unique : histCause garde un pointeur dessus.
 static const char CAUSE_RAFALES_REPETEES[] = "rafales repetees";
+// Evenements journalises sans alerte : entree dans le palier 40-50 km/h
+// et fin de toute mise a plat (le tracker peut se redeployer).
+static const char CAUSE_PALIER[]          = "palier";
+static const char CAUSE_REDEPLOIEMENT[]   = "redeploiement";
 static bool nvsOuvert = false;
 
 // --- Acquisition analogique ---------------------------------
@@ -41,10 +45,12 @@ static int    bufferVentIndex  = 0;
 static int    bufferVentRempli = 0;
 static String tendanceVent     = "stable"; // "up" / "down" / "stable"
 
-// --- Historique des mises en securite (RAM uniquement) ------
-static char        histHeure[NB_EVENEMENTS_VENT][9];  // "HH:MM:SS"
+// --- Historique des evenements vent (persiste en NVS) -------
+// Les evenements enregistres avant la v54 NTP n'ont que "HH:MM:SS"
+// (heure RTC, UTC) : ils sont recharges tels quels.
+static char        histHeure[NB_EVENEMENTS_VENT][20]; // "JJ/MM/AAAA HH:MM:SS", heure de Paris
 static float       histVitesse[NB_EVENEMENTS_VENT];
-static const char* histCause[NB_EVENEMENTS_VENT];     // "moyenne" / "rafale"
+static const char* histCause[NB_EVENEMENTS_VENT];     // "moyenne" / "rafale" / ...
 static int         histIndex  = 0;
 static int         histRempli = 0;
 
@@ -52,21 +58,21 @@ static int         histRempli = 0;
 // HISTORIQUE
 // ============================================================
 
-// Extrait "HH:MM:SS" de l'horodatage RTC complet, ou "??:??:??"
-// si la RTC n'a pas repondu.
-static void heureCourteRTC(char* dest, size_t taille) {
-  char complet[20];
-  if (lireHeureRTC(complet, sizeof(complet))) {
-    // "AAAA-MM-JJ hh:mm:ss" : l'heure commence a l'offset 11
-    strncpy(dest, complet + 11, taille - 1);
-  } else {
-    strncpy(dest, "??:??:??", taille - 1);
+// Heure NTP de Paris au format strftime donne, ou `absent` si l'heure
+// NTP n'est pas encore obtenue. La RTC ne sert plus a l'affichage.
+static void horodatageNTP(char* dest, size_t taille, const char* format, const char* absent) {
+  if (!formaterHeureParis(dest, taille, format)) {
+    strncpy(dest, absent, taille - 1);
+    dest[taille - 1] = '\0';
   }
-  dest[taille - 1] = '\0';
+}
+
+static void heureCourteNTP(char* dest, size_t taille) {
+  horodatageNTP(dest, taille, "%H:%M:%S", "??:??:??");
 }
 
 // --- Persistance NVS ----------------------------------------
-// Format compact : "HH:MM:SS,vitesse,cause|" par evenement,
+// Format compact : "horodatage,vitesse,cause|" par evenement,
 // du plus ancien au plus recent.
 
 static void sauvegarderHistoriqueVent() {
@@ -106,6 +112,8 @@ static void chargerHistoriqueVent() {
     // AJOUT 1 : troisieme cause possible, "rafales repetees".
     histCause[histIndex] = (c == "rafale") ? "rafale"
                          : (c == CAUSE_RAFALES_REPETEES) ? CAUSE_RAFALES_REPETEES
+                         : (c == CAUSE_PALIER) ? CAUSE_PALIER
+                         : (c == CAUSE_REDEPLOIEMENT) ? CAUSE_REDEPLOIEMENT
                          : "moyenne";
 
     histIndex = (histIndex + 1) % NB_EVENEMENTS_VENT;
@@ -139,14 +147,11 @@ static float         alerteVitesse       = 0.0;
 static char          alerteCause[17]     = "";
 static char          alerteHeure[9]      = "";
 
-static void enregistrerEvenementVent(float vitesse, const char* cause) {
-  alerteVentEnAttente = true;
-  alerteVitesse       = vitesse;
-  strncpy(alerteCause, cause, sizeof(alerteCause) - 1);
-  alerteCause[sizeof(alerteCause) - 1] = '\0';
-  heureCourteRTC(alerteHeure, sizeof(alerteHeure));
-
-  heureCourteRTC(histHeure[histIndex], sizeof(histHeure[histIndex]));
+// Ajoute une ligne a l'historique, sans lever d'alerte. `cause` doit
+// etre un litteral statique (histCause garde le pointeur).
+static void journaliserEvenementVent(float vitesse, const char* cause) {
+  horodatageNTP(histHeure[histIndex], sizeof(histHeure[histIndex]),
+                "%d/%m/%Y %H:%M:%S", "heure inconnue");
   histVitesse[histIndex] = vitesse;
   histCause[histIndex]   = cause;
 
@@ -154,6 +159,17 @@ static void enregistrerEvenementVent(float vitesse, const char* cause) {
   if (histRempli < NB_EVENEMENTS_VENT) histRempli++;
 
   sauvegarderHistoriqueVent(); // persiste immediatement en flash
+}
+
+// Mise a plat : alerte a acquitter + ligne d'historique.
+static void enregistrerEvenementVent(float vitesse, const char* cause) {
+  alerteVentEnAttente = true;
+  alerteVitesse       = vitesse;
+  strncpy(alerteCause, cause, sizeof(alerteCause) - 1);
+  alerteCause[sizeof(alerteCause) - 1] = '\0';
+  heureCourteNTP(alerteHeure, sizeof(alerteHeure));
+
+  journaliserEvenementVent(vitesse, cause);
 }
 
 String historiqueVentJson() {
@@ -333,7 +349,7 @@ static void traiterEpisode(float kmh) {
     epFenetresCalmes = 0;
     epMaxFenetre = 0.0; epSommeFenetre = 0.0; epNbFenetre = 0;
     epDebutFenetre = millis();
-    heureCourteRTC(epHeure, sizeof(epHeure));
+    heureCourteNTP(epHeure, sizeof(epHeure));
 
     // Premier point = le pic declencheur lui-meme, a t = 0.
     epAjouter(kmh, kmh);
@@ -510,6 +526,8 @@ static void traiterRafalesRepetees(float kmh) {
     } else if (now - debutCalmeRafales >= REDEPLOIE_DELAI_MS) {
       miseAPlatRafales = false;
       debutCalmeRafales = 0;
+      // Historique seul : redeploiement si les paliers ne tiennent plus le tracker a plat.
+      if (!securiteVentActive) journaliserEvenementVent(kmh, CAUSE_REDEPLOIEMENT);
       Serial.println("Rafales repetees : 15 min de calme, fin de la mise a plat.");
     }
   }
@@ -602,6 +620,7 @@ void updateVent() {
     // --- Palier 1 : mode reduit (amplitude + vitesse limitees) ---
     if (vitesseVentKmh >= SEUIL_VENT_REDUIT && !modeVentReduit) {
       modeVentReduit = true;
+      journaliserEvenementVent(vitesseVentKmh, CAUSE_PALIER);   // historique seul
       Serial.printf("VENT MODERE : %.1f km/h - amplitude limitee a %.0f deg, PWM %d\n",
                     vitesseVentKmh, (double)ANGLE_MAX_VENT_REDUIT_DEG, VITESSE_REDUITE);
     }
@@ -653,6 +672,8 @@ void updateRafale() {
         } else if (millis() - debutCalme >= DUREE_CALME_REQUISE_MS) {
           securiteVentActive = false;
           debutCalme = 0;
+          // Historique seul : redeploiement si aucune autre mise a plat ne tient.
+          if (!miseAPlatRafales) journaliserEvenementVent(vitesseRafaleKmh, CAUSE_REDEPLOIEMENT);
           Serial.println("Calme confirme sur toute la duree : fin de la mise en securite.");
         }
       } else if (debutCalme != 0) {
@@ -724,4 +745,24 @@ unsigned long ventSecondesAvantRedeploiement() {
   unsigned long ecoule = millis() - debutCalmeRafales;
   if (ecoule >= REDEPLOIE_DELAI_MS) return 0;
   return (REDEPLOIE_DELAI_MS - ecoule) / 1000UL;
+}
+
+// ============================================================
+// BANDEAU D'ETAT DE L'INTERFACE - affichage uniquement
+// ------------------------------------------------------------
+// Lit les etats tenus ci-dessus, dans leur ordre de priorite. Les
+// seuils 70 et 20 km/h ne servent qu'a choisir le texte affiche :
+// ils ne commandent rien.
+// ============================================================
+
+static const float AFFICHAGE_TRES_FORT_KMH = 70.0;
+static const float AFFICHAGE_MODERE_KMH    = 20.0;
+
+const char* ventEtatAffichage() {
+  if (securiteVentActive) {
+    return (vitesseVentKmh >= AFFICHAGE_TRES_FORT_KMH) ? "plat-tres-fort" : "plat";
+  }
+  if (miseAPlatRafales) return "plat-rafales";
+  if (modeVentReduit)   return "palier";
+  return (vitesseVentKmh >= AFFICHAGE_MODERE_KMH) ? "modere" : "faible";
 }
